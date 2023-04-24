@@ -143,7 +143,9 @@ fi
 # Update the php.ini file
 DST=/etc/php.ini
 BKUP=$DST.$TIMESTAMP
-if ! egrep -q '^date.timezone' $DST ; then
+if egrep -q '^date.timezone' $DST ; then
+	out "Timezone in $DST is already set."
+else
 	out "Updating timezone in $DST"
 	set_timezone() {
 		TIMEZONE="$TZ"
@@ -165,6 +167,42 @@ if ! egrep -q '^date.timezone' $DST ; then
 	else
 		out "  skipping timezone."
 	fi
+fi
+
+# Check to see if the standard SSL site is configured.
+SSLKEYFILE=/etc/pki/wildcard.fsautomation.com/private/wildcard.fsautomation.com.key
+SSLCRTFILE=/etc/pki/wildcard.fsautomation.com/certs/wildcard-combined.crt
+SSLCONFFILE=/etc/httpd/conf.d/ssl.conf
+COPYFSA=1
+if [[ ! -f $SSLKEYFILE || ! -f $SSLCRTFILE ]] ; then
+	echo "FSA SSL key file or crt file not found."
+	PS3="Choose option:"
+	select o in "Use current SSL cert" "Copy FSA Cert then continue" ; do
+		case $REPLY in
+			1 ) COPYFSA=0 ; break ;;
+			2 )
+				out "Copy over the wildcart certs to /etc/pki/wildcard.fsautomation.com now,"
+				read -p "then press ENTER to continue> " ANS
+				COPYFSA=1
+				break
+				;;
+		esac
+	done
+fi
+if [[ $COPYFSA -eq 0 ]]; then
+	out "Skipping setting FSA SSL cert in apache."
+elif [[ ! -f $SSLKEYFILE || ! -f $SSLCRTFILE ]] ; then
+	out "SSL key and crt file still not found.  Skipping."
+elif ! grep -q "SSLCertificateFile $SSLCRTFILE" $SSLCONFFILE || \
+		! grep -q "SSLCertificateKeyFile $SSLKEYFILE" $SSLCONFFILE ; then
+	out "Setting global SSL cert to wildcard cert"
+	if cp $SSLCONFFILE $SSLCONFFILE.$TIMESTAMP ; then
+		sed -i -e "s,^SSLCertificateFile .*,SSLCertificateFile $SSLCRTFILE," \
+			-e "s,^SSLCertificateKeyFile .*,SSLCertificateKeyFile $SSLKEYFILE," \
+			$SSLCONFFILE
+	fi
+else
+	out "Apache SSL config already using FSA cert."
 fi
 
 section "Finished."
