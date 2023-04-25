@@ -23,7 +23,7 @@ telnet
 traceroute
 unzip
 wget
-xauth
+xorg-x11-xauth
 xorg-x11-fonts-100dpi
 xorg-x11-fonts-misc
 xorg-x11-fonts-Type1

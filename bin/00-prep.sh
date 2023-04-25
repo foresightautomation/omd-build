@@ -30,12 +30,41 @@ while getopts vh c ; do
 done
 shift $(( OPTIND - 1 ))
 
-if [[ $(getenforce) = "Disabled" ]]; then
-	out "SELinux already disabled"
+section "System Settings"
+pause 3
+if type -p getenforce >/dev/null 2>&1 ; then
+	if [[ $(getenforce) = "Disabled" ]]; then
+		out "SELinux already disabled"
+	else
+		out "Disabling SELINUX"
+		sed -i -e 's/SELINUX=.*/SELINUX=disabled/g' /etc/selinux/config
+		setenforce 0
+	fi
 else
-	out "Disabling SELINUX"
-	sed -i -e 's/SELINUX=.*/SELINUX=disabled/g' /etc/selinux/config
-	setenforce 0
+	out "SELINUX not installed."
+fi
+# First, set the timezone
+DOSET=1
+TIMEZONE="$TZ"
+if [[ -z "$TIMEZONE" ]]; then
+	TIMEZONE=$(timedatectl | grep 'Time zone' | awk '{ print $3 }')
+fi
+if [[ -z "$TIMEZONE" ]]; then
+	TIMEZONE=$(readlink /etc/localtime 2>/dev/null | sed -e 's,^.zoneinfo/,,')
+fi
+if [[ -n "$TIMEZONE" && "$TIMEZONE" =~ ^America ]]; then
+	DOSET=0
+fi
+if [[ -z "$TIMEZONE" ]]; then
+	TIMEZONE=America/Los_Angeles
+fi
+if [[ $DOSET -eq 1 ]]; then
+	read -i $TIMEZONE -p "Enter timezone [$TIMEZONE]> " ANS
+	[[ -n "$ANS" ]] && TIMEZONE="$ANS"
+	out "setting system timezone to $TIMEZONE"
+	timedatectl set-timezone $TIMEZONE || exit 1
+else
+	out "system timezone already set to $TIMEZONE"
 fi
 
 section "Installing base repos and updates"
@@ -152,30 +181,6 @@ if [[ "$OS_ID" != "amzn" ]]; then
 	fi
 fi
 
-section "Checking timezone"
-# First, set the timezone
-DOSET=1
-TIMEZONE="$TZ"
-if [[ -z "$TIMEZONE" ]]; then
-	TIMEZONE=$(timedatectl | grep 'Time zone' | awk '{ print $3 }')
-fi
-if [[ -z "$TIMEZONE" ]]; then
-	TIMEZONE=$(readlink /etc/localtime 2>/dev/null | sed -e 's,^.zoneinfo/,,')
-fi
-if [[ -n "$TIMEZONE" && "$TIMEZONE" =~ ^America ]]; then
-	DOSET=0
-fi
-if [[ -z "$TIMEZONE" ]]; then
-	TIMEZONE=America/Los_Angeles
-fi
-if [[ $DOSET -eq 1 ]]; then
-	read -i $TIMEZONE -p "Enter timezone [$TIMEZONE]> " ANS
-	[[ -n "$ANS" ]] && TIMEZONE="$ANS"
-	out "setting system timezone to $TIMEZONE"
-	timedatectl set-timezone $TIMEZONE || exit 1
-else
-	out "system timezone already set to $TIMEZONE"
-fi
 
 out "Checking timezone in php init file(s)"
 if [[ -f /etc/php.ini ]]; then
@@ -232,8 +237,8 @@ else
 				! grep -q "SSLCertificateKeyFile $SSLKEYFILE" $SSLCONFFILE ; then
 			out "Setting global SSL cert to wildcard cert in $SSLCONFFILE"
 			backup_file $SSLCONFFILE
-			sed -i -e "s,^SSLCertificateFile .*,SSLCertificateFile $SSLCRTFILE," \
-				-e "s,^SSLCertificateKeyFile .*,SSLCertificateKeyFile $SSLKEYFILE," \
+			sed -E -i -e "s,^([[:blank:]]*)SSLCertificateFile[[:blank:]].*,\\1SSLCertificateFile $SSLCRTFILE," \
+				-e "s,^([[:blank:]]*)SSLCertificateKeyFile[[:blank:]].*,\\1SSLCertificateKeyFile $SSLKEYFILE," \
 				$SSLCONFFILE
 		else
 			out "Apache SSL config already using FSA cert."
