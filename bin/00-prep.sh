@@ -157,6 +157,19 @@ if [[ -s $DEPPKGS ]]; then
 	fi
 fi
 
+# If we're on amazon linux, python36 is not available.  So, do this 
+# hack to allow omd to work
+DST=/usr/lib64/libpython3.6m.so.1.0
+if [[ "$OS_ID" = "amzn" && ! -f $DST ]]; then
+	PYVERS=$(python3 --version | awk '{ print $2 }')
+	# break up x.y.z
+	IFS=. read x y z <<< "$PYVERS"
+	PYVERS="$x.$y"
+	
+	out "HACK - linking python $PYVERS library to libpython3.6m"
+	ln -s "$PYVERS" $DST
+fi
+
 # If we're not on amzn linux, install haveged, which provides
 # entropy.  We also want to add web protocols to the firewall.
 if [[ "$OS_ID" != "amzn" ]]; then
