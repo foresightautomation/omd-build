@@ -54,7 +54,7 @@ if [[ "$OS_PKGTYPE" = "yum" ]] ; then
 				amazon-linux-extras install epel -y | verbout
 				[[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
 				;;
-			* ) installpkg epel-release || exit 1 ;;
+			* ) installpkgs epel-release || exit 1 ;;
 		esac
 	fi
 
@@ -91,13 +91,14 @@ else
 		newtempfile LCSKEY
 		curl -s "https://labs.consol.de/repo/stable/RPM-GPG-KEY" > $LCSKEY
 		# 20.04 was the last time apt-key was valid
-		if version_gt 20.04 $OS_VERS ; then
+		if version_gt $OS_VERS 20.04 ; then
 			mv $LCSKEY /etc/apt/trusted.gpg.d/labs.console.de.asc
+			chmod 644 /etc/apt/trusted.gpg.d/labs.console.de.asc
 		else
 			cat $LCSKEY | apt-key add -
 		fi
 		echo "deb http://labs.consol.de/repo/stable/ubuntu $(lsb_release -cs) main" > $DST
-		out "Running apt update."
+		out "Running apt update.  This can take awhile..."
 		apt update | verbout
 	fi
 fi
@@ -107,22 +108,33 @@ PKGSFILE=$TOPDIR/etc/${OS_PKGTYPE}-pkgs.list
 newtempfile DEPPKGS
 egrep -v '#' $PKGSFILE > $DEPPKGS 2>/dev/null
 if [[ -s $DEPPKGS ]]; then
-	section "Installing dependency packages"
+	section "Checking dependency packages"
 	# Doing this in a loop takes longer, but it will output more
 	# more info.
 	exec 3<$DEPPKGS
+	newtempfile DEPPKGS2
 	while read -u 3 pkg ; do
-		checkandinstall $pkg || exit 1
+		if check4pkg $pkg ; then
+			out "package $pkg already installed"
+		else
+			echo "$pkg" >> $DEPPKGS2
+		fi
 	done
+	if [[ ! -s $DEPPKGS2 ]]; then
+		out "no packages need to be installed"
+	else
+		out $(wc -l < $DEPPKGS2) packages will be installed.
+		installpkgs $(cat $DEPPKGS2)
+	fi
 fi
 
 # If we're not on amzn linux, install haveged, which provides
 # entropy.  We also want to add web protocols to the firewall.
 if [[ "$OS_ID" != "amzn" ]]; then
-	checkandinstall haveged || exit 1
-	checkandinstall haveged || exit 1
-	systemctl enable haveged 2>&1 | verbout
-	systemctl start haveged 2>&1 | verbout
+	#checkandinstall haveged || exit 1
+	#checkandinstall haveged || exit 1
+	#systemctl enable haveged 2>&1 | verbout
+	#systemctl start haveged 2>&1 | verbout
 	
 	newtempfile FIREWALLSVCS
 	if firewalcmd --list-services > $FIREWALLSVCS 2>&1 ; then
@@ -140,39 +152,51 @@ if [[ "$OS_ID" != "amzn" ]]; then
 	fi
 fi
 
-# Update the php.ini file
-DST=/etc/php.ini
-BKUP=$DST.$TIMESTAMP
-if egrep -q '^date.timezone' $DST ; then
-	out "Timezone in $DST is already set."
+section "Checking timezone"
+# First, set the timezone
+DOSET=1
+TIMEZONE="$TZ"
+if [[ -z "$TIMEZONE" ]]; then
+	TIMEZONE=$(timedatectl | grep 'Time zone' | awk '{ print $3 }')
+fi
+if [[ -z "$TIMEZONE" ]]; then
+	TIMEZONE=$(readlink /etc/localtime 2>/dev/null | sed -e 's,^.zoneinfo/,,')
+fi
+if [[ -n "$TIMEZONE" && "$TIMEZONE" =~ ^America ]]; then
+	DOSET=0
+fi
+if [[ -z "$TIMEZONE" ]]; then
+	TIMEZONE=America/Los_Angeles
+fi
+if [[ $DOSET -eq 1 ]]; then
+	read -i $TIMEZONE -p "Enter timezone [$TIMEZONE]> " ANS
+	[[ -n "$ANS" ]] && TIMEZONE="$ANS"
+	out "setting system timezone to $TIMEZONE"
+	timedatectl set-timezone $TIMEZONE || exit 1
 else
-	out "Updating timezone in $DST"
-	set_timezone() {
-		TIMEZONE="$TZ"
-		[[ -n "$TIMEZONE" ]] && return 0
-		TIMEZONE=$(timedatectl | grep 'Time zone' | awk '{ print $3 }')
-		[[ -n "$TIMEZONE" && "$TIMEZONE" =~ ^America ]] && return 0
-		TIMEZONE=$(readlink /etc/localtime 2>/dev/null | sed -e 's,^.zoneinfo/,,')
-		[[ -n "$TIMEZONE" ]] && return 0
-		return 1
-	}
-
-	if ! set_timezone ; then
-		out "  could not determine timezone"
-		read -p "Enter Timezone: " TIMEZONE
-	fi
-	if [[ -n "$TIMEZONE" ]]; then
-		backup_file $DST
-		sed -i -e "/;date.timezone/a date.timezone = \"$TIMEZONE\"" $DST
-	else
-		out "  skipping timezone."
-	fi
+	out "system timezone already set to $TIMEZONE"
 fi
 
+out "Checking timezone in php init file(s)"
+if [[ -f /etc/php.ini ]]; then
+	PHPINIFILES=(/etc/php.ini)
+else
+	PHPINIFILES=( $(find /etc/php -name php.ini) )
+fi
+for DST in "${PHPINIFILES[@]}" ; do
+	if egrep -q '^date.timezone' "$DST" ; then
+		out "  $DST has timezone set"
+		continue
+	fi
+	out "  updating timezone in $DST"
+	backup_file $DST
+	sed -i -e "/;date.timezone/a date.timezone = \"$TIMEZONE\"" $DST
+done
+
+section "Checking SSL configuration"
 # Check to see if the standard SSL site is configured.
 SSLKEYFILE=/etc/pki/wildcard.fsautomation.com/private/wildcard.fsautomation.com.key
 SSLCRTFILE=/etc/pki/wildcard.fsautomation.com/certs/wildcard-combined.crt
-SSLCONFFILE=/etc/httpd/conf.d/ssl.conf
 COPYFSA=1
 if [[ ! -f $SSLKEYFILE || ! -f $SSLCRTFILE ]] ; then
 	echo "FSA SSL key file or crt file not found."
@@ -193,16 +217,28 @@ if [[ $COPYFSA -eq 0 ]]; then
 	out "Skipping setting FSA SSL cert in apache."
 elif [[ ! -f $SSLKEYFILE || ! -f $SSLCRTFILE ]] ; then
 	out "SSL key and crt file still not found.  Skipping."
-elif ! grep -q "SSLCertificateFile $SSLCRTFILE" $SSLCONFFILE || \
-		! grep -q "SSLCertificateKeyFile $SSLKEYFILE" $SSLCONFFILE ; then
-	out "Setting global SSL cert to wildcard cert"
-	if cp $SSLCONFFILE $SSLCONFFILE.$TIMESTAMP ; then
-		sed -i -e "s,^SSLCertificateFile .*,SSLCertificateFile $SSLCRTFILE," \
-			-e "s,^SSLCertificateKeyFile .*,SSLCertificateKeyFile $SSLKEYFILE," \
-			$SSLCONFFILE
-	fi
 else
-	out "Apache SSL config already using FSA cert."
+	# Find the file
+	SSLCONFFILE=
+	for i in /etc/httpd/conf.d/ssl.conf /etc/apache2/sites-available/default-ssl.conf ; do
+		[[ -f $i ]] || continue
+		SSLCONFFILE=$i
+		break
+	done
+	if [[ -z "$SSLCONFFILE" ]]; then
+		out "ERROR: could not find ssl.conf file"
+	else
+		if ! grep -q "SSLCertificateFile $SSLCRTFILE" $SSLCONFFILE || \
+				! grep -q "SSLCertificateKeyFile $SSLKEYFILE" $SSLCONFFILE ; then
+			out "Setting global SSL cert to wildcard cert in $SSLCONFFILE"
+			backup_file $SSLCONFFILE
+			sed -i -e "s,^SSLCertificateFile .*,SSLCertificateFile $SSLCRTFILE," \
+				-e "s,^SSLCertificateKeyFile .*,SSLCertificateKeyFile $SSLKEYFILE," \
+				$SSLCONFFILE
+		else
+			out "Apache SSL config already using FSA cert."
+		fi
+	fi
 fi
 
 section "Finished."

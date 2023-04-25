@@ -9,7 +9,6 @@ iptables-services
 jq
 logrotate
 mailx
-mailx
 nmap
 omd
 perl-Expect
