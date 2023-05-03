@@ -118,7 +118,7 @@ elif [[ "$OS_PKGTYPE" = "apt" ]] ; then
 	# Install the FSA repo.
 	out "installing fsautomation.com repo"
 	if add_apt_repo http://apt.fsautomation.com/$DISTRIBUTOR_ID \
-				 http://apt.fsautomation.com/$DISTRIBUTOR_ID/RPG-GPG-KEYS ; then
+				 http://apt.fsautomation.com/$DISTRIBUTOR_ID/APT-GPG-KEY ; then
 		DO_APT_UPDATE=1
 	fi
 
