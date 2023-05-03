@@ -109,27 +109,27 @@ if [[ "$OS_PKGTYPE" = "yum" ]] ; then
 	out "Running yum update.  This can take awhile..."
 	yum -y update | verbout
 	[[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
-else
-	# Install the Consol Labs repo
-	DST=/etc/apt/sources.list.d/labs-consol-stable.list
-	if [[ -f $DST ]]; then
-		out "labs-console-stable package source already installed"
-	else
-		out "Installing labs-console-stable package source"
-		LSBRELEASE=$(lsb_release -cs)
-		newtempfile LCSKEY
-		curl -s "https://labs.consol.de/repo/stable/RPM-GPG-KEY" > $LCSKEY
-		# 20.04 was the last time apt-key was valid
-		if version_gt $OS_VERS 20.04 ; then
-			mv $LCSKEY /etc/apt/trusted.gpg.d/labs.console.de.asc
-			chmod 644 /etc/apt/trusted.gpg.d/labs.console.de.asc
-		else
-			cat $LCSKEY | apt-key add -
-		fi
-		echo "deb http://labs.consol.de/repo/stable/ubuntu $(lsb_release -cs) main" > $DST
-		out "Running apt update.  This can take awhile..."
-		apt update | verbout
+elif [[ "$OS_PKGTYPE" = "apt" ]] ; then
+	LSBRELEASE=$(lsb_release -cs)
+	DISTRIBUTOR_ID=$(lsb_release -is | tr '[A-Z]' '[a-z]')
+	newtempfile LCSKEY
+	DO_APT_UPDATE=0
+
+	# Install the FSA repo.
+	out "installing fsautomation.com repo"
+	if add_apt_repo http://apt.fsautomation.com/$DISTRIBUTOR_ID \
+				 http://apt.fsautomation.com/$DISTRIBUTOR_ID/RPG-GPG-KEYS ; then
+		DO_APT_UPDATE=1
 	fi
+
+	# Install the Consol Labs repo
+	out "installing labs.consol.de repo"
+	if add_apt_repo https://labs.consol.de/repo/stable/$DISTRIBUTOR_ID \
+					https://labs.consol.de/repo/stable/RPM-GPG-KEY ; then
+		DO_APT_UPDATE=1
+	fi
+	out "Running apt update.  This can take awhile..."
+	apt update | verbout
 fi
 
 # Now install the rest of the packages
@@ -153,7 +153,7 @@ if [[ -s $DEPPKGS ]]; then
 		out "no packages need to be installed"
 	else
 		out $(wc -l < $DEPPKGS2) packages will be installed.
-		installpkgs $(cat $DEPPKGS2)
+		installpkgs $(cat $DEPPKGS2) || exit 1
 	fi
 fi
 

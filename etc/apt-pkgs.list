@@ -4,7 +4,8 @@ cpanminus
 dos2unix
 fping
 php
-#fsa-get-net-config
+fsa-get-net-config
+fsa-kcommon
 git
 #iptables-services
 jq
@@ -14,7 +15,7 @@ nmap
 omd
 perl-doc
 libexpect-perl
-#perl-FSA-KomodoUtils
+fsa-komodoutils-perl
 libunix-syslog-perl
 postfix
 rsync

@@ -10,6 +10,7 @@ jq
 logrotate
 mailx
 nmap
+fsa-kcommon
 omd
 perl-Expect
 perl-FSA-KomodoUtils
