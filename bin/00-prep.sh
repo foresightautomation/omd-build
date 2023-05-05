@@ -137,9 +137,10 @@ PKGSFILE=$TOPDIR/etc/${OS_PKGTYPE}-pkgs.list
 newtempfile DEPPKGS
 egrep -v '#' $PKGSFILE > $DEPPKGS 2>/dev/null
 if [[ -s $DEPPKGS ]]; then
+	XVAL=0
 	section "Checking dependency packages"
 	# Doing this in a loop takes longer, but it will output more
-	# more info.
+	# more info.  Also, when an install fails, we can see it.
 	exec 3<$DEPPKGS
 	newtempfile DEPPKGS2
 	while read -u 3 pkg ; do
@@ -152,8 +153,15 @@ if [[ -s $DEPPKGS ]]; then
 	if [[ ! -s $DEPPKGS2 ]]; then
 		out "no packages need to be installed"
 	else
-		out $(wc -l < $DEPPKGS2) packages will be installed.
-		installpkgs $(cat $DEPPKGS2) || exit 1
+		exec 3<$DEPPKGS2
+		out "installing" $(wc -l < $DEPPKGS2) "package(s)"
+		while read -u 3 pkg ; do
+			installpkgs $pkg || XVAL=1
+		done
+	fi
+	if [[ $XVAL -eq 1 ]]; then
+		out "Error installing some packages."
+		exit 1
 	fi
 fi
 
@@ -170,8 +178,7 @@ if [[ "$OS_ID" = "amzn" && ! -f $DST ]]; then
 	ln -s "$PYVERS" $DST
 fi
 
-# If we're not on amzn linux, install haveged, which provides
-# entropy.  We also want to add web protocols to the firewall.
+# If we're not on amzn linux, add web protocols to the firewall.
 if [[ "$OS_ID" != "amzn" ]]; then
 	#checkandinstall haveged || exit 1
 	#checkandinstall haveged || exit 1
@@ -259,6 +266,55 @@ else
 	fi
 fi
 
+DST=/foresight/etc/omd-build.env
+out "Creating $DST ..."
+# The /foresight/etc dir will have been created by the packages.
+cp $TOPDIR/etc/omd-build.env $DST || exit 1
+chmod 644 $DST || exit 1
+
+section "Pulling the omd-config-common repo."
+DST=/root/.ssh/omd-config-common_git_ed25519
+out "Generating SSH key for git pulls"
+if [[ ! -d /root/.ssh ]] ; then
+	mkdir /root/.ssh || exit 1
+	chmod 700 /root/.ssh | exit 1
+fi
+if [[ ! -f $DST ]]; then
+	out "generating ssh key ..."
+	ssh-keygen -t ed25519 -N '' -f $DST 2>&1 | verbout
+	chmod 644 $DST || exit 1
+
+	echo ""
+	out "You will need to paste this as a deploy key for the"
+	out "omd-config-common repo:"
+	echo ""
+	cat $DST.pub | tee -a $LOGFILE
+	echo ""
+	read -p "Press ENTER after this is done to continue> " ANS
+fi
+
+out "checking out omd-config-common repo ..."
+# Create a script to do the checkout so we don't mess with our
+# envars.  This is taken from the README.md file of the repo.
+newtempfile CLONESCRIPT
+chmod 700 $CLONESCRIPT
+cat > $CLONESCRIPT<<EOF
+#!/bin/bash
+cd /root
+ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+export GIT_SSH_COMMAND='ssh -i /root/.ssh/omd-config-common_git_ed25519 -o IdentitiesOnly=yes'
+git clone --no-checkout git@github.com:foresightautomation/omd-config-common.git
+cd omd-config-common
+git config core.worktree /
+git reset --hard origin/master
+git pull
+unset GIT_SSH_COMMAND
+EOF
+/bin/bash $CLONESCRIPT
+if false ; then
+	/usr/local/sbin/omd-config-common-initialize
+	/usr/local/sbin/omd-config-common-run-deploy
+fi
 section "Finished."
 out "The log file is $LOGFILE"
 out "To create a new site, you can run:"
