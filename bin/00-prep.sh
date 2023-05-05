@@ -16,13 +16,19 @@ updating various configurations of the system.
 
 Options:
 --------
+    -a    AMI mode.  This is used by the special AWS instance that will
+          be used to generate an AMI.  Host-specific things will NOT be
+          performed here.
+
     -v    verbose.  Print more of what's going on.
 "
 	exit $xval
 }
 VERBOSE=0
-while getopts vh c ; do
+AMIMODE=0
+while getopts avh c ; do
 	case "$c" in
+		a ) AMIMODE=1 ;;
 		v ) VERBOSE=1 ;;
 		h ) usage 0 ;;
 		* ) usage 2 "unknown argument" ;;
@@ -42,29 +48,6 @@ if type -p getenforce >/dev/null 2>&1 ; then
 	fi
 else
 	out "SELINUX not installed."
-fi
-# First, set the timezone
-DOSET=1
-TIMEZONE="$TZ"
-if [[ -z "$TIMEZONE" ]]; then
-	TIMEZONE=$(timedatectl | grep 'Time zone' | awk '{ print $3 }')
-fi
-if [[ -z "$TIMEZONE" ]]; then
-	TIMEZONE=$(readlink /etc/localtime 2>/dev/null | sed -e 's,^.zoneinfo/,,')
-fi
-if [[ -n "$TIMEZONE" && "$TIMEZONE" =~ ^America ]]; then
-	DOSET=0
-fi
-if [[ -z "$TIMEZONE" ]]; then
-	TIMEZONE=America/Los_Angeles
-fi
-if [[ $DOSET -eq 1 ]]; then
-	read -i $TIMEZONE -p "Enter timezone [$TIMEZONE]> " ANS
-	[[ -n "$ANS" ]] && TIMEZONE="$ANS"
-	out "setting system timezone to $TIMEZONE"
-	timedatectl set-timezone $TIMEZONE || exit 1
-else
-	out "system timezone already set to $TIMEZONE"
 fi
 
 section "Installing base repos and updates"
@@ -156,6 +139,7 @@ if [[ -s $DEPPKGS ]]; then
 		exec 3<$DEPPKGS2
 		out "installing" $(wc -l < $DEPPKGS2) "package(s)"
 		while read -u 3 pkg ; do
+			out "  installing $pkg"
 			installpkgs $pkg || XVAL=1
 		done
 	fi
@@ -201,6 +185,74 @@ if [[ "$OS_ID" != "amzn" ]]; then
 	fi
 fi
 
+DST=/foresight/etc/omd-build.env
+out "Creating $DST ..."
+# The /foresight/etc dir will have been created by the packages.
+cp $TOPDIR/etc/omd-build.env $DST || exit 1
+chmod 644 $DST || exit 1
+
+#######################################################################
+#######################################################################
+if [[ $AMIMODE -eq 1 ]]; then
+	out "Finished with basic configuration.  You will need to run this
+script again when a new AMI has been provisioned in order to do 
+host-specific setup."
+	exit 0
+fi
+#######################################################################
+#######################################################################
+# Do the host-specific updates.
+
+# Set the timezone
+DOSET=1
+TIMEZONE="$TZ"
+if [[ -z "$TIMEZONE" ]]; then
+	TIMEZONE=$(timedatectl | grep 'Time zone' | awk '{ print $3 }')
+fi
+if [[ -z "$TIMEZONE" ]]; then
+	TIMEZONE=$(readlink /etc/localtime 2>/dev/null | sed -e 's,^.zoneinfo/,,')
+fi
+if [[ -n "$TIMEZONE" && "$TIMEZONE" =~ ^America ]]; then
+	DOSET=0
+fi
+if [[ -z "$TIMEZONE" ]]; then
+	TIMEZONE=America/Los_Angeles
+fi
+if [[ $DOSET -eq 1 ]]; then
+	read -i $TIMEZONE -p "Enter timezone [$TIMEZONE]> " ANS
+	[[ -n "$ANS" ]] && TIMEZONE="$ANS"
+	out "setting system timezone to $TIMEZONE"
+	timedatectl set-timezone $TIMEZONE || exit 1
+else
+	out "system timezone already set to $TIMEZONE"
+fi
+
+# Check the hostname.  We eventually want {cust}-nagios.fsautomation.com
+CURHN=$(hostname)
+NEWHN=
+if [[ $CURHN != *.fsautomation.com ]]; then
+	out "checking hostname."
+	# Set ANS to be the suggested name
+	if [[ $CURHN == *.compute.internal ]]; then
+		# This is an aws name.  See if there's a CNAME set up
+		# for it in the foresightautomation.biz domain.
+		ANS=$(dig +short CNAME $(hostname -s))
+		if [[ -n "$ANS" && "$ANS" != *.* ]]; then
+			ANS=$ANS.fsautomation.com
+		fi
+	elif [[ $CURNH == *.* ]]; then
+		# It's a FQHN.  Use that for our suggestion
+		ANS=$CURHN
+	else
+		# Otherwise, put it into the fsautomation.com domain
+		ANS=$CURHN.fsautomation.com
+	fi
+	read -e -i "$ANS" -p "Enter FQHN for this server: " NEWHN
+fi
+if [[ -n "$NEWHN" ]]; then
+	out "  updating hostname"
+	hostnamectl set-hostname $NEWHN
+fi
 
 out "Checking timezone in php init file(s)"
 if [[ -f /etc/php.ini ]]; then
@@ -265,12 +317,6 @@ else
 		fi
 	fi
 fi
-
-DST=/foresight/etc/omd-build.env
-out "Creating $DST ..."
-# The /foresight/etc dir will have been created by the packages.
-cp $TOPDIR/etc/omd-build.env $DST || exit 1
-chmod 644 $DST || exit 1
 
 section "Pulling the omd-config-common repo."
 DST=/root/.ssh/omd-config-common_git_ed25519
