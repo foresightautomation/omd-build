@@ -15,6 +15,7 @@ nmap
 omd
 perl-doc
 libexpect-perl
+libipc-run-perl
 fsa-komodoutils-perl
 libunix-syslog-perl
 postfix
