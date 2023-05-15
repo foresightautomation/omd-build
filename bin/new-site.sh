@@ -82,12 +82,15 @@ fi
 
 # Run an osm command for the site
 # run_osm site command ...
-run_omd() {
+function run_omd() {
     typeset _site=$1
 	shift
 	echo "omd $@" | omd su $_site | egrep -v '^Last login'
 }
-
+# Run command as the $OMD_SITE user
+function run_site() {
+	runuser -u $OMD_SITE -- "$@"
+}
 #
 # Initial configuration
 if [[ $SITE_EXISTS -eq 0 ]]; then
@@ -125,6 +128,7 @@ if [[ $SITE_EXISTS -eq 0 ]]; then
 		MYPORT=$(( MYPORT + 1 ))
 	done
 	out "Setting NSCA port to $MYPORT"
+	pause 3
 	echo "$MYPORT" >> $TMP_NSCA_PORTS
 	run_omd $OMD_SITE config set NSCA_TCP_PORT $MYPORT 2>&1 | verbout
 
@@ -141,7 +145,7 @@ if [[ $SITE_EXISTS -eq 0 ]]; then
 		MYPORT=$(( MYPORT + 1 ))
 	done
 	out "Setting Livestatus port to $MYPORT"
-	echo "$MYPORT" >> $TMP_LIVE_PORTS
+	pause 3
 	run_omd $OMD_SITE config set LIVESTATUS_TCP_PORT $MYPORT 2>&1 | verbout
 
 	if type -p firewall-cmd >/dev/null 2>&1 ; then
@@ -155,6 +159,7 @@ if [[ $SITE_EXISTS -eq 0 ]]; then
 		DST=/etc/apache2/conf-available/omd-default.site.conf
 		if [[ ! -f $DST ]]; then
 			out "Setting '$OMD_SITE' as the default site for this server."
+	pause 3
 			echo "RedirectMatch ^/$ /${OMD_SITE}/" > $DST
 			a2enmod rewrite 2>&1 | verbout
 			a2ensite omd-default.site 2>&1 | verbout
@@ -168,18 +173,25 @@ if [[ $SITE_EXISTS -eq 0 ]]; then
 			DST=/etc/httpd/conf.d/omd-default.site.conf
 			if [[ ! -f $DST ]]; then
 				out "Setting '$OMD_SITE' as the default site for this server."
+	pause 3
 				echo "RedirectMatch ^/$ /${OMD_SITE}/" > $DEFSITECONF
 				systemctl restart httpd 2>&1 | verbout
 			fi
 		fi
 	fi
 
-	out "Generating SSH key for git pulls"
-	[[ ! -d $OMD_ROOT/.ssh ]] || mkdir $OMD_ROOT/.ssh
 	DST=$OMD_ROOT/.ssh/id_ed25519
-	ssh-keygen -t ed25519 -N '' -f $DST 2>&1 | verbout
-	chown -R $OMD_SITE.$OMD_SITE $OMD_ROOT/.ssh
-	chmod -R go-rwx $OMD_ROOT/.ssh
+	if [[ -f $DST ]]; then
+		out "SSH key for git pulls exists."
+	else
+		out "Generating SSH key for git pulls"
+		pause 3
+		# After creating the key, chown/chmod the entire directory
+		[[ -d $OMD_ROOT/.ssh ]] || mkdir $OMD_ROOT/.ssh
+		ssh-keygen -t ed25519 -N '' -f $DST 2>&1 | verbout
+		chown -R $OMD_SITE.$OMD_SITE $OMD_ROOT/.ssh
+		chmod -R go-rwx $OMD_ROOT/.ssh
+	fi
 
 	echo ""
 	out "You will need to paste this as a deploy key for the"
@@ -187,11 +199,12 @@ if [[ $SITE_EXISTS -eq 0 ]]; then
 	echo ""
 	cat $DST.pub | tee -a $LOGFILE
 	echo ""
-	read -p "Press ENTER after this is done to continue> " ANS
+	pause "Press ENTER after this is done to continue> "
 
 	# Create a script to do the checkout so we can run it as the
 	# omd user.
 	out "Checking out the omd-config-$OMD_SITE repo"
+	pause 3
 	cat > $TMPF1<<EOF
 #!/bin/bash
 cd ~/local
@@ -208,14 +221,15 @@ fi
 [[ -z "$OMD_ROOT" ]] && OMD_ROOT=$(getent passwd $OMD_SITE | awk -F: '{ print $6 }')
 
 # Verify that USER5 is our nagios plugins
-section "Setting up FSA resource paths"
+section "Checking up FSA resource paths"
+pause 3
 DST=$OMD_ROOT/etc/naemon/resource.cfg
-if egrep -q '^$USER5$=' $DST ; then
+if egrep -q '^\$USER5\$=' $DST ; then
 	out " \$USER5\$ is set"
 else
 	out "  setting \$USER5\$ to the fas plugins path"
 	backup_file $DST
-	echo "\$USER5\$=/forsight/lib64/nagios/plugins" >> $DST
+	run_site echo "\$USER5\$=/forsight/lib64/nagios/plugins" >> $DST
 fi
 	
 ##
@@ -230,6 +244,8 @@ function nrdp_config() {
 	NRDP_VERSION=2.0.5
 	NRDP_TOP=$OMD_ROOT/local/share/nrdp
 
+	section "Checking NRDP ..."
+	pause 3
 	out "Checking for NRDP $NRDP_VERSION"
 
 	# Find the current version installed.
@@ -262,9 +278,12 @@ function nrdp_config() {
 	[[ -d "$NRDP_TOP" ]] && return 1
 
 	out "Installing NRDP $NRDP_VERSION"
-	su $OMD_SITE -c "mkdir -p '$NRDP_TOP'" || exit 1
+	pause 3
+	run_site mkdir -p "$NRDP_TOP" || exit 1
+	# We can't run this as the OMD_SITE user, as the files are
+	# in root's home directory.
 	tar --strip-components=1 -C "$NRDP_TOP" -xzf \
-		$TOPDIR/src/nrdp-$NRDP_VERSION.tar.gz
+			 $TOPDIR/src/nrdp-$NRDP_VERSION.tar.gz
 
 	chown -R $OMD_SITE.$OMD_SITE "$NRDP_TOP"
 
@@ -274,23 +293,27 @@ function nrdp_config() {
 	# the site user to read and delete the files placed by the
 	# apache user.
 	out "  updating permissions on checkresults dir"
+	pause 3
 	chmod g+ws $OMD_ROOT/tmp/naemon/checkresults
 	
-	# Copy the nrdp.conf file
+	# Copy the nrdp.conf apache file
 	out "  installing nrdp.conf apache config"
+	pause 3
 	sed -e "s|\${OMD_SITE}|$OMD_SITE|g" \
 		-e "s|\${OMD_ROOT}|$OMD_ROOT|g" \
-		"$TOPDIR"/src/nrdp.conf  > $TMPF1
+		"$TOPDIR"/src/nrdp-apache.conf  > $TMPF1 || exit 1
 	copy_site_file $TMPF1 "$OMD_ROOT/etc/apache/system.d/nrdp.conf"
 	
 	out "  updating nrdp config.inc.php ..."
+	pause 3
 	DST=$NRDP_TOP/server/config.inc.php
 
 	if [[ -n "$OLD_NRDP_TOKEN" ]];  then
 		out "  setting token to old token ..."
-		/foresight/bin/omd-get-nrdp-password --set --password "$OLD_NRDP_TOKEN" $OMD_SITE
+		/foresight/sbin/omd-get-nrdp-password --set --password "$OLD_NRDP_TOKEN" $OMD_SITE
 	else
-		/foresight/bin/omd-get-nrdp-password --set $OMD_SITE
+		out "  creating new token"
+		/foresight/sbin/omd-get-nrdp-password --set $OMD_SITE
 	fi
 	
 	# We're going to:
@@ -298,7 +321,8 @@ function nrdp_config() {
 	#   - set the checkresults dir
 	#   - set the command file
 	#   - change log file
-	sed -i.$TIMESTAMP \
+	backup_file $DST
+	sed -i \
 		-e "s/nagcmd/$OMD_SITE/" \
 		-e "s|/usr/local/nagios/var/rw/nagios.cmd|$OMD_ROOT/tmp/run/naemon.cmd|" \
 		-e "s|/usr/local/nagios/var/spool/checkresults|$OMD_ROOT/tmp/naemon/checkresults|" \
@@ -306,6 +330,7 @@ function nrdp_config() {
 		$DST
 	
 	out "  restarting httpd"
+	pause 3
 	case "$OS_ID_LIKE" in
 		*rhel* ) systemctl restart httpd ;;
 		*debian* ) systemctl restart apache2 ;;
@@ -315,21 +340,28 @@ nrdp_config
 ##
 ## NSCP
 ##
+# The NSCP configuration is a directory that will contain content that
+# is downloadable by the clients.  Management of those files needs to
+# be done elsewhere.  Common files can be hard linked to save space,
+# and customer/site specific files can simply be there.
 function nscp_config() {
 	typeset _f1
 	NSCP_TOP=$OMD_ROOT/local/share/nscp
 
 	section "Checking NSCP ..."
+	pause 3
 
 	if [[ ! -d "$NSCP_TOP" ]]; then
-		out "  installing NSCP directory ... "
-		su $OMD_SITE -c "mkdir -p '$NSCP_TOP'"
+		out "  creating NSCP directory ... "
+		mkdir -p "$NSCP_TOP"
 		chown -R $OMD_SITE.$OMD_SITE "$NSCP_TOP"
 	fi
 
-	# Copy the Apache nscp.conf file
+	# Copy the Apache nscp.conf file.
 	_f1="$OMD_ROOT/etc/apache/system.d/nscp.conf"
-	if [[ ! -f "$_f1" ]]; then
+	if [[ -f "$_f1" ]]; then
+		out "  nscp.conf apache config already installed."
+	else
 		out "  installing nscp.conf apache config"
 		sed -e "s|\${OMD_SITE}|$OMD_SITE|g" \
 			-e "s|\${NSCP_TOP}|$NSCP_TOP|g" \
@@ -345,15 +377,22 @@ function nscp_config() {
 }
 nscp_config
 
+section "Updating htpasswd file"
+DST=$OMD_ROOT/etc/htpasswd
+add_htpasswd_entry "$DST" "dchang" '$apr1$JmfsY5Fo$nt5mLa853LxVHmX86K7Ax.'
+add_htpasswd_entry "$DST" "erickson" '$apr1$heLauRBm$j6o9EBPDDm5bCYMOiUrrH0'
+add_htpasswd_entry "$DST" "dgood" '$apr1$h3TsjY2Z$.De2TpyAHfI0zw9O8ldGS0'
+add_htpasswd_entry "$DST" "fsareports" '$apr1$OH7Qx5bW$1/4AAcmVLgw/MDjFAShY/1'
+chown $OMD_SITE.$OMD_SITE $DST
+chmod 664 $DST
 #
+
+section "Running the deploy script as $OMD_SITE"
+DST=$OMD_ROOT/local/omd-config-$OMD_SITE/bin/run-deploy.pl
 	
 section "Finished."
 echo "Logged to $LOGFILE"
 echo ""
 echo "To complete the site setup, run:"
 echo ""
-echo "    omd su $OMD_SITE"
-echo "    omd start"
-echo "    ./local/nagios-config/bin/run-deploy.pl"
-echo "    hash -r"
-echo "    fsa-init-naemon-server"
+echo "    omd restart $OMD_SITE"

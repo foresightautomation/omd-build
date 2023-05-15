@@ -16,28 +16,119 @@ updating various configurations of the system.
 
 Options:
 --------
-    -a    AMI mode.  This is used by the special AWS instance that will
-          be used to generate an AMI.  Host-specific things will NOT be
-          performed here.
+    --branch {name}
+          The branch of the omd-config-common package.
 
-    -v    verbose.  Print more of what's going on.
+    --awsami
+          AWS AMI mode.  This is used by the special AWS instance that
+          will be used to generate an AMI.  Host-specific things will
+          NOT be performed here.
+
+    --fsaami
+          This is a monitoring server for an FSA AMI client.  Extra
+          packages or configuration may be performed.
+
+    --verbose
+          Print more of what's going on.
 "
 	exit $xval
 }
 VERBOSE=0
 AMIMODE=0
-while getopts avh c ; do
-	case "$c" in
-		a ) AMIMODE=1 ;;
-		v ) VERBOSE=1 ;;
-		h ) usage 0 ;;
-		* ) usage 2 "unknown argument" ;;
+FSAAMI=0
+BRANCH=""
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+		--branch | -b ) BRANCH="$2" ; shift ;;
+		--awsami ) AMIMODE=1 ;;
+		--fsaami ) FSAAMI=1 ;;
+		--verbose | -v ) VERBOSE=1 ;;
+		--help | -h  ) usage 0 ;;
+		* ) usage 2 "${1}: unknown argument" ;;
 	esac
+	shift
 done
 shift $(( OPTIND - 1 ))
 
+# This is the ssh key for pulling the git repo
+SSH_IDFILE=/root/.ssh/omd-config-common_git_ed25519
+
 section "System Settings"
-pause 3
+# Grab all of the host information up top to let the rest of the
+# script run without interruption.
+if [[ $AMIMODE -eq 0 ]]; then
+	# Set the timezone
+	DOSET=1
+	TIMEZONE="$TZ"
+	if [[ -z "$TIMEZONE" ]]; then
+		TIMEZONE=$(timedatectl | grep 'Time zone' | awk '{ print $3 }')
+	fi
+	if [[ -z "$TIMEZONE" ]]; then
+		TIMEZONE=$(readlink /etc/localtime 2>/dev/null | sed -e 's,^.zoneinfo/,,')
+	fi
+	if [[ -n "$TIMEZONE" && "$TIMEZONE" =~ ^America ]]; then
+		DOSET=0
+	fi
+	if [[ -z "$TIMEZONE" ]]; then
+		TIMEZONE=America/Los_Angeles
+	fi
+	if [[ $DOSET -eq 1 ]]; then
+		read -i $TIMEZONE -p "Enter timezone [$TIMEZONE]> " ANS
+		[[ -n "$ANS" ]] && TIMEZONE="$ANS"
+		out "setting system timezone to $TIMEZONE"
+		timedatectl set-timezone $TIMEZONE || exit 1
+	else
+		out "system timezone already set to $TIMEZONE"
+	fi
+	
+	# Check the hostname.  We eventually want {cust}-nagios.fsautomation.com
+	CURHN=$(hostname)
+	NEWHN=
+	if [[ $CURHN != *.fsautomation.com ]]; then
+		out "checking hostname."
+		# Set ANS to be the suggested name
+		if [[ $CURHN == *.compute.internal ]]; then
+			# This is an aws name.  See if there's a CNAME set up
+			# for it in the foresightautomation.biz domain.
+			ANS=$(dig +short CNAME $(hostname -s))
+			if [[ -n "$ANS" && "$ANS" != *.* ]]; then
+				ANS=$ANS.fsautomation.com
+			fi
+		elif [[ $CURNH == *.* ]]; then
+			# It's a FQHN.  Use that for our suggestion
+			ANS=$CURHN
+		else
+			# Otherwise, put it into the fsautomation.com domain
+			ANS=$CURHN.fsautomation.com
+		fi
+		read -e -i "$ANS" -p "Enter FQHN for this server: " NEWHN
+	fi
+	if [[ -n "$NEWHN" ]]; then
+		out "  updating hostname"
+		hostnamectl set-hostname $NEWHN
+	fi
+	DST=$SSH_IDFILE
+	if [[ -f $DST ]]; then
+		out "SSH key for omd-config-common git pull exists."
+	else
+		out "Generating SSH key for omd-config-common git pulls"
+		if [[ ! -d /root/.ssh ]] ; then
+			mkdir /root/.ssh || exit 1
+			chmod 700 /root/.ssh | exit 1
+		fi
+		ssh-keygen -t ed25519 -N '' -f $DST 2>&1 | verbout
+		chmod 644 $DST || exit 1
+		
+		echo ""
+		out "You will need to paste this as a deploy key for the"
+		out "omd-config-common repo:"
+		echo ""
+		cat $DST.pub | tee -a $LOGFILE
+		echo ""
+		pause "Press ENTER after this is done to continue"
+	fi
+fi
+
 if type -p getenforce >/dev/null 2>&1 ; then
 	if [[ $(getenforce) = "Disabled" ]]; then
 		out "SELinux already disabled"
@@ -121,7 +212,8 @@ newtempfile DEPPKGS
 egrep -v '#' $PKGSFILE > $DEPPKGS 2>/dev/null
 if [[ -s $DEPPKGS ]]; then
 	XVAL=0
-	section "Checking dependency packages"
+	section "Checking and installing dependency packages"
+	pause 3
 	# Doing this in a loop takes longer, but it will output more
 	# more info.  Also, when an install fails, we can see it.
 	exec 3<$DEPPKGS
@@ -185,10 +277,15 @@ if [[ "$OS_ID" != "amzn" ]]; then
 	fi
 fi
 
-DST=/foresight/etc/omd-build.env
-out "Creating $DST ..."
 # The /foresight/etc dir will have been created by the packages.
-cp $TOPDIR/etc/omd-build.env $DST || exit 1
+DST=/foresight/etc/omd-build.env
+if [[ ! -f $DST ]]; then
+	out "Creating $DST ..."
+	cp $TOPDIR/etc/omd-build.env $DST || exit 1
+else
+	out "Possibly updating $DST ..."
+	diff_replace $DST $TOPDIR/etc/omd-build.env
+fi
 chmod 644 $DST || exit 1
 
 #######################################################################
@@ -203,56 +300,6 @@ fi
 #######################################################################
 # Do the host-specific updates.
 
-# Set the timezone
-DOSET=1
-TIMEZONE="$TZ"
-if [[ -z "$TIMEZONE" ]]; then
-	TIMEZONE=$(timedatectl | grep 'Time zone' | awk '{ print $3 }')
-fi
-if [[ -z "$TIMEZONE" ]]; then
-	TIMEZONE=$(readlink /etc/localtime 2>/dev/null | sed -e 's,^.zoneinfo/,,')
-fi
-if [[ -n "$TIMEZONE" && "$TIMEZONE" =~ ^America ]]; then
-	DOSET=0
-fi
-if [[ -z "$TIMEZONE" ]]; then
-	TIMEZONE=America/Los_Angeles
-fi
-if [[ $DOSET -eq 1 ]]; then
-	read -i $TIMEZONE -p "Enter timezone [$TIMEZONE]> " ANS
-	[[ -n "$ANS" ]] && TIMEZONE="$ANS"
-	out "setting system timezone to $TIMEZONE"
-	timedatectl set-timezone $TIMEZONE || exit 1
-else
-	out "system timezone already set to $TIMEZONE"
-fi
-
-# Check the hostname.  We eventually want {cust}-nagios.fsautomation.com
-CURHN=$(hostname)
-NEWHN=
-if [[ $CURHN != *.fsautomation.com ]]; then
-	out "checking hostname."
-	# Set ANS to be the suggested name
-	if [[ $CURHN == *.compute.internal ]]; then
-		# This is an aws name.  See if there's a CNAME set up
-		# for it in the foresightautomation.biz domain.
-		ANS=$(dig +short CNAME $(hostname -s))
-		if [[ -n "$ANS" && "$ANS" != *.* ]]; then
-			ANS=$ANS.fsautomation.com
-		fi
-	elif [[ $CURNH == *.* ]]; then
-		# It's a FQHN.  Use that for our suggestion
-		ANS=$CURHN
-	else
-		# Otherwise, put it into the fsautomation.com domain
-		ANS=$CURHN.fsautomation.com
-	fi
-	read -e -i "$ANS" -p "Enter FQHN for this server: " NEWHN
-fi
-if [[ -n "$NEWHN" ]]; then
-	out "  updating hostname"
-	hostnamectl set-hostname $NEWHN
-fi
 
 out "Checking timezone in php init file(s)"
 if [[ -f /etc/php.ini ]]; then
@@ -283,7 +330,7 @@ if [[ ! -f $SSLKEYFILE || ! -f $SSLCRTFILE ]] ; then
 			1 ) COPYFSA=0 ; break ;;
 			2 )
 				out "Copy over the wildcart certs to /etc/pki/wildcard.fsautomation.com now,"
-				read -p "then press ENTER to continue> " ANS
+				pause "then press ENTER to continue"
 				COPYFSA=1
 				break
 				;;
@@ -319,27 +366,6 @@ else
 fi
 
 section "Pulling the omd-config-common repo."
-DST=/root/.ssh/omd-config-common_git_ed25519
-out "Generating SSH key for git pulls"
-if [[ ! -d /root/.ssh ]] ; then
-	mkdir /root/.ssh || exit 1
-	chmod 700 /root/.ssh | exit 1
-fi
-if [[ ! -f $DST ]]; then
-	out "generating ssh key ..."
-	ssh-keygen -t ed25519 -N '' -f $DST 2>&1 | verbout
-	chmod 644 $DST || exit 1
-
-	echo ""
-	out "You will need to paste this as a deploy key for the"
-	out "omd-config-common repo:"
-	echo ""
-	cat $DST.pub | tee -a $LOGFILE
-	echo ""
-	read -p "Press ENTER after this is done to continue> " ANS
-fi
-
-out "checking out omd-config-common repo ..."
 # Create a script to do the checkout so we don't mess with our
 # envars.  This is taken from the README.md file of the repo.
 newtempfile CLONESCRIPT
@@ -354,8 +380,13 @@ cd omd-config-common
 git config core.worktree /
 git reset --hard origin/master
 git pull
-unset GIT_SSH_COMMAND
 EOF
+if [[ -n "$BRANCH" ]]; then
+	cat >> $CLONESCRIPT <<EOF
+git checkout $BRANCH
+git pull
+EOF
+fi
 /bin/bash $CLONESCRIPT
 if false ; then
 	/usr/local/sbin/omd-config-common-initialize
