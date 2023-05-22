@@ -91,6 +91,8 @@ function run_omd() {
 function run_site() {
 	runuser -u $OMD_SITE -- "$@"
 }
+CFGREPO="omd-config-$OMD_SITE"
+CFGREPOTOP=$OMD_ROOT/local/$CFGREPO
 #
 # Initial configuration
 if [[ $SITE_EXISTS -eq 0 ]]; then
@@ -180,7 +182,7 @@ if [[ $SITE_EXISTS -eq 0 ]]; then
 		fi
 	fi
 
-	DST=$OMD_ROOT/.ssh/id_ed25519
+	DST=$OMD_ROOT/.ssh/${CFGREPO}_git_ed25519
 	if [[ -f $DST ]]; then
 		out "SSH key for git pulls exists."
 	else
@@ -193,9 +195,10 @@ if [[ $SITE_EXISTS -eq 0 ]]; then
 		chmod -R go-rwx $OMD_ROOT/.ssh
 	fi
 
+	
 	echo ""
 	out "You will need to paste this as a deploy key for the"
-	out "omd-config-$OMD_SITE repo:"
+	out "$CFGREPO repo:"
 	echo ""
 	cat $DST.pub | tee -a $LOGFILE
 	echo ""
@@ -227,7 +230,7 @@ DST=$OMD_ROOT/etc/naemon/resource.cfg
 if egrep -q '^\$USER5\$=' $DST ; then
 	out " \$USER5\$ is set"
 else
-	out "  setting \$USER5\$ to the fas plugins path"
+	out "  setting \$USER5\$ to the fsa plugins path"
 	backup_file $DST
 	run_site echo "\$USER5\$=/forsight/lib64/nagios/plugins" >> $DST
 fi
@@ -259,12 +262,13 @@ function nrdp_config() {
 		if [[ -n "$CUR_VERSION" ]]; then
 			# If the new version is newer than the previous version, 
 			# then back it up.
-			if version_gt "$NRDP_VERSION" "$CUR_VERSION" ; then
+
+			if (( $(bc -l <<< "$NRDP_VERSION > $CUR_VERSION") )) ; then
 				out "NRDP $CUR_VERSION installed.  Backing up to $NRDP_TOP.$TIMESTAMP"
 				
 				OLD_NRDP_TOKEN=$($OMD_ROOT/local/bin/get-nrdp-password 2>/dev/null)
 				/bin/mv "$NRDP_TOP" "$NRDP_TOP.$TIMESTAMP"
-			elif version_gt "$CUR_VERSION" "$NRDP_VERSION" ; then
+			elif (( $(bc -l <<< "$CUR_VERSION > $NRDP_VERSION") )) ; then
 				out "NRDP $CUR_VERSION installed and is newer.  Skipping."
 				return 1
 			else
@@ -277,11 +281,11 @@ function nrdp_config() {
 	# If we're here and we have a directory, then just return.
 	[[ -d "$NRDP_TOP" ]] && return 1
 
-	out "Installing NRDP $NRDP_VERSION"
+	out "  installing NRDP $NRDP_VERSION"
 	pause 3
 	run_site mkdir -p "$NRDP_TOP" || exit 1
-	# We can't run this as the OMD_SITE user, as the files are
-	# in root's home directory.
+	# We can't run this as the OMD_SITE user, as the tar file and
+	# apache config files are in root's home directory.
 	tar --strip-components=1 -C "$NRDP_TOP" -xzf \
 			 $TOPDIR/src/nrdp-$NRDP_VERSION.tar.gz
 
@@ -342,8 +346,8 @@ nrdp_config
 ##
 # The NSCP configuration is a directory that will contain content that
 # is downloadable by the clients.  Management of those files needs to
-# be done elsewhere.  Common files can be hard linked to save space,
-# and customer/site specific files can simply be there.
+# be done elsewhere.  Common files can be hard linked between sites to
+# save space, and customer/site specific files can simply be there.
 function nscp_config() {
 	typeset _f1
 	NSCP_TOP=$OMD_ROOT/local/share/nscp
@@ -389,6 +393,7 @@ chmod 664 $DST
 
 section "Running the deploy script as $OMD_SITE"
 DST=$OMD_ROOT/local/omd-config-$OMD_SITE/bin/run-deploy.pl
+runuser -u $OMD_SITE  -- $DST
 	
 section "Finished."
 echo "Logged to $LOGFILE"
