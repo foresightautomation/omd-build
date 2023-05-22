@@ -388,8 +388,8 @@ git pull
 EOF
 fi
 /bin/bash $CLONESCRIPT
-/usr/local/sbin/omd-config-common-initialize
-/usr/local/sbin/omd-config-common-run-deploy
+/foresight/sbin/omd-config-common-initialize
+/foresight/sbin/omd-config-run-deploy --repo omd-config-common
 section "Finished."
 out "The log file is $LOGFILE"
 out "To create a new site, you can run:"
