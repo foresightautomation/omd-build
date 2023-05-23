@@ -171,14 +171,14 @@ if [[ "$OS_PKGTYPE" = "yum" ]] ; then
 	fi
 
 	# Install the Consol Labs repo
-	if check4pkg labs-consol-stable ; then
-		out "labs-consol-stable already installed"
-	else
-		out "installing labs-consol-stable repo"
-		pause 3
-		yum -y install https://labs.consol.de/repo/stable/rhel7/i386/labs-consol-stable.rhel7.noarch.rpm | verbout
-		[[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
-	fi
+#	if check4pkg labs-consol-stable ; then
+#		out "labs-consol-stable already installed"
+#	else
+#		out "installing labs-consol-stable repo"
+#		pause 3
+#		yum -y install https://labs.consol.de/repo/stable/rhel7/i386/labs-consol-stable.rhel7.noarch.rpm | verbout
+#		[[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
+#	fi
 
 	out "Running yum update.  This can take awhile..."
 	yum -y update | verbout
@@ -197,11 +197,11 @@ elif [[ "$OS_PKGTYPE" = "apt" ]] ; then
 	fi
 
 	# Install the Consol Labs repo
-	out "installing labs.consol.de repo"
-	if add_apt_repo https://labs.consol.de/repo/stable/$DISTRIBUTOR_ID \
-					https://labs.consol.de/repo/stable/RPM-GPG-KEY ; then
-		DO_APT_UPDATE=1
-	fi
+#	out "installing labs.consol.de repo"
+#	if add_apt_repo https://labs.consol.de/repo/stable/$DISTRIBUTOR_ID \
+#					https://labs.consol.de/repo/stable/RPM-GPG-KEY ; then
+#		DO_APT_UPDATE=1
+#	fi
 	out "Running apt update.  This can take awhile..."
 	apt update | verbout
 fi
@@ -388,8 +388,15 @@ git pull
 EOF
 fi
 /bin/bash $CLONESCRIPT
+out "  running omd-config-common-initialize"
 /foresight/sbin/omd-config-common-initialize
+out "  running omd-config-run-deploy"
 /foresight/sbin/omd-config-run-deploy --repo omd-config-common
+out "  running omd-safe-deploy-ncfg.sh"
+/foresight/sbin/omd-safe-deploy-ncfg.sh \
+	--no-omd-site --no-reload \
+	/foresight/repo-deploy/omd-config-common/common.d \
+	/foresight/etc/naemon/conf.d/common.d
 section "Finished."
 out "The log file is $LOGFILE"
 out "To create a new site, you can run:"

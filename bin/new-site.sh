@@ -28,6 +28,9 @@ Options:
         This can be specified using the DO_QUERY envar, setting to 1 to
         query, and 0 to not query.
 
+    --branch {branch_name}
+        The branch name for the omd-config-{site} repo.  Default is master.
+
     --help | -h
 	    Show this help.
 
@@ -43,11 +46,13 @@ test "$DO_QUERY" -eq "$DO_QUERY" >/dev/null 2>&1 || DO_QUERY=0
 test "$VERBOSE" -eq "$VERBOSE" >/dev/null 2>&1 || VERBOSE=0
 newtempfile TMPF1
 
+BRANCH=
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 		--query | -Q ) [[ $ONTTY -eq 1 ]] && DO_QUERY=1 ;;
 		--help | -h ) usage 0 ;;
 		--site | -s ) OMD_SITE="$2" ; shift ;;
+		--branch ) BRANCH="$2" ; shift ;;
 		--verbose | -v ) VERBOSE=1 ;;
 		-- ) break ;;
 		* ) usage 2 "${1}: unknown option" ;;
@@ -212,8 +217,19 @@ if [[ $SITE_EXISTS -eq 0 ]]; then
 #!/bin/bash
 cd ~/local
 ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
-git clone git@github.com:foresightautomation/omd-config-$OMD_SITE.git
+export GIT_SSH_COMMAND="ssh -i $DST -o IdentitiesOnly=yes"
+git clone --no-ccheckout git@github.com:foresightautomation/omd-config-$OMD_SITE.git
+cd omd-config-$OMD_SITE
+git config core.worktree $OMD_ROOT
+git reset --hard origin/master
+git pull
 EOF
+	if [[ -n "$BRANCH" ]]; then
+		cat >> $TMPF1 <<EOF
+git checout $BRANCH
+git pull
+EOF
+	fi
 	chmod 755 $TMPF1
 	su $OMD_SITE -c "/bin/bash $TMPF1"
 	chmod 600 $TMPF1
@@ -224,7 +240,7 @@ fi
 [[ -z "$OMD_ROOT" ]] && OMD_ROOT=$(getent passwd $OMD_SITE | awk -F: '{ print $6 }')
 
 # Verify that USER5 is our nagios plugins
-section "Checking up FSA resource paths"
+section "Checking FSA resource paths"
 pause 3
 DST=$OMD_ROOT/etc/naemon/resource.cfg
 if egrep -q '^\$USER5\$=' $DST ; then
@@ -233,6 +249,21 @@ else
 	out "  setting \$USER5\$ to the fsa plugins path"
 	backup_file $DST
 	run_site echo "\$USER5\$=/forsight/lib64/nagios/plugins" >> $DST
+fi
+
+# Make sure our common config dir is set
+section "Checking FSA config paths"
+DDIR=/foresight/etc/naemon/conf.d/common.d
+DST=$OMD_ROOT/etc/naemon/naemon.d/$CFGREPO.cfg
+if egrep -q "^cfg_dir=$DDIR" $DST 2>/dev/null ; then
+	out "  $DST set as config dir."
+else
+	out "  adding 'cfg_dir=$DST'"
+	test -d $DDIR || mkdir -p $DDIR || exit 1
+	backup_file $DST
+	run_site echo "cfg_dir=$DST" >> $DST
+	chown $OMD_SITE.$OMD_SITE $DST
+	chmod 664 $DST
 fi
 	
 ##
@@ -391,9 +422,18 @@ chown $OMD_SITE.$OMD_SITE $DST
 chmod 664 $DST
 #
 
-section "Running the deploy script as $OMD_SITE"
-DST=$OMD_ROOT/local/omd-config-$OMD_SITE/bin/run-deploy.pl
+# Run the deploy scripts.  As we've already checked out the files, we will
+# want to do the initialize, post-deploy, and safe-deploy scripts.
+section "Running the deploy scripts as $OMD_SITE"
+out "  ${CFGRFEPO}-initialize"
+DST=$OMD_ROOT/local/sbin/${CFGREPO}-initialize
 runuser -u $OMD_SITE  -- $DST
+out "  ${CFGRFEPO}-post-deploy"
+DST=$OMD_ROOT/local/sbin/${CFGREPO}-post-deploy
+runuser -u $OMD_SITE  -- $DST
+out "  safe-deploy"
+DST=$OMD_ROOT/local/$CFGREPO/${OMD_SITE}.d
+runuser -u $OMD_SITE  -- /foresight/sbin/omd-safe-deploy-ncfg.sh $DST
 	
 section "Finished."
 echo "Logged to $LOGFILE"
