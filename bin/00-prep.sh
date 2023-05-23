@@ -16,20 +16,27 @@ updating various configurations of the system.
 
 Options:
 --------
-    --branch {name}
-          The branch of the omd-config-common package.
+  --branch {name}
+    The branch of the omd-config-common package.
 
-    --awsami
-          AWS AMI mode.  This is used by the special AWS instance that
-          will be used to generate an AMI.  Host-specific things will
-          NOT be performed here.
+  --awsami
+    AWS AMI mode.  This is used by the special AWS instance that will
+    be used to generate an AMI.  Host-specific things will NOT be
+    performed here.
 
-    --fsaami
-          This is a monitoring server for an FSA AMI client.  Extra
-          packages or configuration may be performed.
+  --fsaami
+    This is a monitoring server for an FSA AMI client.  Extra packages
+    or configuration may be performed.
 
-    --verbose
-          Print more of what's going on.
+  --site-name {name}
+    Run the new-site script with the site name specified.
+
+  --site-branch {branch}
+    If running the new-site script, set this as the branch for the
+    omd-config-{site} repo.
+
+  --verbose
+    Print more of what's going on.
 "
 	exit $xval
 }
@@ -37,11 +44,15 @@ VERBOSE=0
 AMIMODE=0
 FSAAMI=0
 BRANCH=""
+SITE_NAME=
+SITE_BRANCH=
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 		--branch | -b ) BRANCH="$2" ; shift ;;
 		--awsami ) AMIMODE=1 ;;
 		--fsaami ) FSAAMI=1 ;;
+		--site-name ) SITE_NAME="$2" ; shift ;;
+		--site-branch ) SITE_BRANCH="$2" ; shift ;;
 		--verbose | -v ) VERBOSE=1 ;;
 		--help | -h  ) usage 0 ;;
 		* ) usage 2 "${1}: unknown argument" ;;
@@ -105,7 +116,7 @@ if [[ $AMIMODE -eq 0 ]]; then
 	fi
 	if [[ -n "$NEWHN" ]]; then
 		out "  updating hostname"
-		hostnamectl set-hostname $NEWHN
+		hostnamectl set-hostname $NEWHN || exit 1
 	fi
 	DST=$SSH_IDFILE
 	if [[ -f $DST ]]; then
@@ -117,6 +128,10 @@ if [[ $AMIMODE -eq 0 ]]; then
 			chmod 700 /root/.ssh | exit 1
 		fi
 		ssh-keygen -t ed25519 -N '' -f $DST 2>&1 | verbout
+		if [[ ${PIPESTATUS[0}} -eq 0 ]] ; then
+			echo "error generating ssh key"
+			exit 1
+		fi
 		chmod 644 $DST || exit 1
 		
 		echo ""
@@ -135,7 +150,7 @@ if type -p getenforce >/dev/null 2>&1 ; then
 	else
 		out "Disabling SELINUX"
 		sed -i -e 's/SELINUX=.*/SELINUX=disabled/g' /etc/selinux/config
-		setenforce 0
+		setenforce 0 || exit 1
 	fi
 else
 	out "SELINUX not installed."
@@ -256,11 +271,6 @@ fi
 
 # If we're not on amzn linux, add web protocols to the firewall.
 if [[ "$OS_ID" != "amzn" ]]; then
-	#checkandinstall haveged || exit 1
-	#checkandinstall haveged || exit 1
-	#systemctl enable haveged 2>&1 | verbout
-	#systemctl start haveged 2>&1 | verbout
-	
 	newtempfile FIREWALLSVCS
 	if firewalcmd --list-services > $FIREWALLSVCS 2>&1 ; then
 		_reload=0
@@ -268,11 +278,13 @@ if [[ "$OS_ID" != "amzn" ]]; then
 			grep -qw $i $FIREWALLSVCS && continue
 			out "Adding $i to firewall rules"
 			firewall-cmd --permanent --add-service=$i | verbout
+			[[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
 			_reload=1
 		done
 		if [[ $_reload -eq 1 ]]; then
 			out "Reloading firewall"
 			firewall-cmd --reload | verbout
+			[[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
 		fi
 	fi
 fi
@@ -300,7 +312,6 @@ fi
 #######################################################################
 # Do the host-specific updates.
 
-
 out "Checking timezone in php init file(s)"
 if [[ -f /etc/php.ini ]]; then
 	PHPINIFILES=(/etc/php.ini)
@@ -314,7 +325,7 @@ for DST in "${PHPINIFILES[@]}" ; do
 	fi
 	out "  updating timezone in $DST"
 	backup_file $DST
-	sed -i -e "/;date.timezone/a date.timezone = \"$TIMEZONE\"" $DST
+	sed -i -e "/;date.timezone/a date.timezone = \"$TIMEZONE\"" $DST || exit 1
 done
 
 section "Checking SSL configuration"
@@ -351,26 +362,31 @@ else
 	done
 	if [[ -z "$SSLCONFFILE" ]]; then
 		out "ERROR: could not find ssl.conf file"
+		exit 1
 	else
 		if ! grep -q "SSLCertificateFile $SSLCRTFILE" $SSLCONFFILE || \
-				! grep -q "SSLCertificateKeyFile $SSLKEYFILE" $SSLCONFFILE ; then
+			! grep -q "SSLCertificateKeyFile $SSLKEYFILE" $SSLCONFFILE ; then
 			out "Setting global SSL cert to wildcard cert in $SSLCONFFILE"
 			backup_file $SSLCONFFILE
 			sed -E -i -e "s,^([[:blank:]]*)SSLCertificateFile[[:blank:]].*,\\1SSLCertificateFile $SSLCRTFILE," \
 				-e "s,^([[:blank:]]*)SSLCertificateKeyFile[[:blank:]].*,\\1SSLCertificateKeyFile $SSLKEYFILE," \
-				$SSLCONFFILE
+				$SSLCONFFILE || exit 1
 		else
 			out "Apache SSL config already using FSA cert."
 		fi
 	fi
 fi
 
-section "Pulling the omd-config-common repo."
-# Create a script to do the checkout so we don't mess with our
-# envars.  This is taken from the README.md file of the repo.
-newtempfile CLONESCRIPT
-chmod 700 $CLONESCRIPT
-cat > $CLONESCRIPT<<EOF
+section "Checking the omd-config-common repo."
+DST=/root/omd-config-common
+if [[ -d $DST/.git ]]; then
+	out "  omd-config-common repo exists"
+else
+	# Create a script to do the checkout so we don't mess with our
+	# envars.  This is taken from the README.md file of the repo.
+	newtempfile CLONESCRIPT
+	chmod 700 $CLONESCRIPT
+	cat > $CLONESCRIPT<<EOF
 #!/bin/bash
 cd /root
 ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
@@ -381,24 +397,33 @@ git config core.worktree /
 git reset --hard origin/master
 git pull
 EOF
-if [[ -n "$BRANCH" ]]; then
-	cat >> $CLONESCRIPT <<EOF
+	if [[ -n "$BRANCH" ]]; then
+		cat >> $CLONESCRIPT <<EOF
 git checkout $BRANCH
 git pull
 EOF
+	fi
+	/bin/bash $CLONESCRIPT || exit 1
+	out "  running omd-config-common-initialize"
+	/foresight/sbin/omd-config-common-initialize || exit 1
+	out "  running omd-config-run-deploy"
+	/foresight/sbin/omd-config-run-deploy --repo omd-config-common || exit 1
+	out "  running omd-safe-deploy-ncfg.sh"
+	/foresight/sbin/omd-safe-deploy-ncfg.sh \
+		--no-omd-site --no-reload \
+		/foresight/repo-deploy/omd-config-common/common.d \
+		/foresight/etc/naemon/conf.d/common.d || exit 1
 fi
-/bin/bash $CLONESCRIPT
-out "  running omd-config-common-initialize"
-/foresight/sbin/omd-config-common-initialize
-out "  running omd-config-run-deploy"
-/foresight/sbin/omd-config-run-deploy --repo omd-config-common
-out "  running omd-safe-deploy-ncfg.sh"
-/foresight/sbin/omd-safe-deploy-ncfg.sh \
-	--no-omd-site --no-reload \
-	/foresight/repo-deploy/omd-config-common/common.d \
-	/foresight/etc/naemon/conf.d/common.d
-section "Finished."
+section "Finished with prep."
 out "The log file is $LOGFILE"
-out "To create a new site, you can run:"
-out ""
-out "    $TOPDIR/bin/new-site.sh {sitename}"
+if [[ -n "$SITE_NAME" ]]; then
+	section "Running new-site script for the $SITE_NAME site."
+	pause 5
+	ARGS=(-s $SITE_NAME)
+	[[ -n "$SITE_BRANCH" ]] && ARGS+=(--branch $SITE_BRANCH)
+	$TOPDIR/bin/new-site.sh "${ARGS[@]}" || exit 1
+else
+	out "To create a new site, you can run:"
+	out ""
+	out "    $TOPDIR/bin/new-site.sh {sitename}"
+fi

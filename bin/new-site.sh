@@ -12,7 +12,7 @@ tty -s && ONTTY=1
 usage() {
     xval=$1
 	shift
-	[[ $@ ]] && echo "$@"
+	[[ $# -gt 0 ]] && echo "$@"
 	echo "usage: OPTIONS [sitename]
 
 Create a new OMD naemon site, configure NSCA, LiveStatus, and NRPD.
@@ -22,11 +22,6 @@ Options:
     --site | -s sitename
         Use the site name specified.  Otherwise, it's determined based
         on the hostname.  This can be specified using the OMD_SITE envar.
-
-    --query | -Q
-        Query to to verify the site to install.
-        This can be specified using the DO_QUERY envar, setting to 1 to
-        query, and 0 to not query.
 
     --branch {branch_name}
         The branch name for the omd-config-{site} repo.  Default is master.
@@ -42,14 +37,12 @@ Options:
 }
 
 # If the envars are set, make sure they are numbers.
-test "$DO_QUERY" -eq "$DO_QUERY" >/dev/null 2>&1 || DO_QUERY=0
 test "$VERBOSE" -eq "$VERBOSE" >/dev/null 2>&1 || VERBOSE=0
 newtempfile TMPF1
 
 BRANCH=
 while [[ $# -gt 0 ]]; do
 	case "$1" in
-		--query | -Q ) [[ $ONTTY -eq 1 ]] && DO_QUERY=1 ;;
 		--help | -h ) usage 0 ;;
 		--site | -s ) OMD_SITE="$2" ; shift ;;
 		--branch ) BRANCH="$2" ; shift ;;
@@ -77,129 +70,153 @@ if [[ -z "$OMD_SITE" ]]; then
 	esac
 fi
 
-# See if it exists
-SITE_EXISTS=0
-# We exit 1 from awk if we DO find it.
-if ! omd sites | awk '$1 == "'$OMD_SITE'" { exit(1); }' ; then
-	out "Site exists.  Skipping creation step."
-	SITE_EXISTS=1
-fi
-
-# Run an osm command for the site
-# run_osm site command ...
+##
+## Helper functions
+##
+# Run an omd command for the site
+# run_omd site command ...
 function run_omd() {
     typeset _site=$1
 	shift
-	echo "omd $@" | omd su $_site | egrep -v '^Last login'
+	echo omd "$@" | omd su $_site
+	return ${PIPESTATUS[1]}
 }
 # Run command as the $OMD_SITE user
 function run_site() {
 	runuser -u $OMD_SITE -- "$@"
 }
+##
+## END Helper functions
+##
+
+
+# See if it exists
+# We exit 1 from awk if we DO find it.
+if ! omd sites | awk '$1 == "'$OMD_SITE'" { exit(1); }' ; then
+	out "Site exists.  Skipping creation step."
+else 
+	out "Creating new site: $OMD_SITE"
+	omd create $OMD_SITE 2>&1 | verbout
+	[[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
+fi
+
+out "Retrieving OMD_ROOT"
+OMD_ROOT=$(getent passwd $OMD_SITE | awk -F: '{ print $6 }')
+if [[ -z "$OMD_ROOT" ]] ; then
+	echo "Cannot find $OMD_SITE password entry."
+	exit 1
+fi
+
 CFGREPO="omd-config-$OMD_SITE"
 CFGREPOTOP=$OMD_ROOT/local/$CFGREPO
-#
-# Initial configuration
-if [[ $SITE_EXISTS -eq 0 ]]; then
-	section "Installing new site: $OMD_SITE"
-	if [[ $ONTTY -eq 1 && "$DO_QUERY" = "1" ]]; then
-		read -p "Is this OK? > " ANS
-		case "$ANS" in
-			y* | Y* ) : ;;
-			* ) out "Exiting"; exit 1 ;;
-		esac
-	fi
-	newtempfile TMP_NSCA_PORTS
-	newtempfile TMP_LIVE_PORTS
-	
-	# Grab a list of all of the NSCA and LIVESTATUS ports.
-	for i in $(omd sites | awk '$NR > 1 { print $1 }'); do
-		run_omd $i "config show NSCA_TCP_PORT" 2>/dev/null >> $TMP_NSCA_PORTS
-		run_omd $i "config show LIVESTATUS_TCP_PORT" 2>/dev/null >> $TMP_LIVE_PORTS
-	done
-	sed -i -e '/Last login/d' -e '/^$/d' $TMP_NSCA_PORTS
-	sed -i -e '/Last login/d' -e '/^$/d' $TMP_LIVE_PORTS
-	
-	date >> $LOGFILE
 
-	omd create $OMD_SITE 2>&1 | verbout
-	if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
+section "Checking network services"
+newtempfile TMPPORTS
+VAL=$(run_omd $OMD_SITE config show NSCA)
+if [[ "$VAL" = "on" ]]; then
+	VAL=$(run_omd $OMD_SITE config show NSCA_TCP_PORT)
+	out "  NSCA is already configured and is using port $VAL"
+else
+	out "  finding NSCA ports."
+	> $TMPPORTS
+	for i in $(omd sites | awk '$NR > 1 { print $1 }') ; do
+		run_omd $i config show NSCA_TCP_PORT >> $TMPPORTS
+	done
+	sort -u -o $TMPPORTS $TMPPORTS
+	MYPORT=$(( $(tail -1 $TMPPORTS) + 1 ))
+	out "  turning on NSCA"
+	run_omd $OMD_SITE config set NSCA on 2>&1 | verbout
+	[[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
+	out "  setting NSCA port to $MYPORT"
+	run_omd $OMD_SITE config set NSCA_TCP_PORT $MYPORT 2>&1 | verbout
+	[[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
+	if type -p firewall-cmd >/dev/null 2>&1 ; then
+		out "  adding NSCA port to firewall"
+		firewall-cmd --permanent --add-port=$MYPORT/tcp | verbout
+		[[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
+		firewall-cmd --reload | verbout
+		[[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
+	fi
+fi
+
+VAL=$(run_omd $OMD_SITE config show LIVESTATUS_TCP)
+if [[ "$VAL" = "on" ]]; then
+	VAL=$(run_omd $OMD_SITE config show LIVESTATUS_TCP_PORT)
+	out "  LIVESTATUS is already configured and is using port $VAL"
+else
+	out "  finding LIVESTATUS ports."
+	> $TMPPORTS
+	for i in $(omd sites | awk '$NR > 1 { print $1 }') ; do
+		run_omd $i config show LIVESTATUS_TCP_PORT >> $TMPPORTS
+	done
+	sort -u -o $TMPPORTS $TMPPORTS
+	MYPORT=$(( $(tail -1 $TMPPORTS) + 1 ))
+	out "  turning on LIVESTATUS"
+	run_omd $OMD_SITE config set LIVESTATUS_TCP on 2>&1 | verbout
+	[[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
+	out "  setting LIVESTATUS port to $MYPORT"
+	run_omd $OMD_SITE config set LIVESTATUS_TCP_PORT $MYPORT 2>&1 | verbout
+	[[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
+	if type -p firewall-cmd >/dev/null 2>&1 ; then
+		out "  adding LIVESTATUS port to firewall"
+		firewall-cmd --permanent --add-port=$MYPORT/tcp | verbout
+		[[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
+		firewall-cmd --reload | verbout
+		[[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
+	fi
+fi
+
+section "Checking httpd configuration."
+# This next test may not be universal.
+if [[ -d /etc/apache2/conf-available ]]; then
+	DST=/etc/apache2/conf-available/omd-default.conf
+	if [[ -f $DST ]]; then
+		out "  omd-default already configured"
+	else
+		out "  setting '$OMD_SITE' as the default site for this server."
+		echo "RedirectMatch ^/$ /${OMD_SITE}/" > $DST
+		a2enmod rewrite 2>&1 | verbout
+		[[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
+		a2enconf omd-default.site 2>&1 | verbout
+		[[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
+		systemctl reload apache2 2>&1 | verbout
+		[[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
+	fi
+elif [[ "$OS_ID_LIKE" == *rhel* ]]; then
+	systemctl status httpd >/dev/null 2>&1
+	# A return of 4 means it doesn't exist.  Anything less than
+	# that is either OK, it's down, or it's disabled.
+	if [[ $? -lt 4 ]]; then
+		DST=/etc/httpd/conf.d/omd-default.conf
+		if [[ -f $DST ]]; then
+			out "  omd-default already configured"
+		else
+			out "  setting '$OMD_SITE' as the default site for this server."
+			pause 3
+			echo "RedirectMatch ^/$ /${OMD_SITE}/" > $DEFSITECONF
+			systemctl restart httpd 2>&1 | verbout
+			[[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
+		fi
+	else
+		out "  httpd status bad."
 		exit 1
 	fi
-	export OMD_ROOT=$(getent passwd $OMD_SITE | awk -F: '{ print $6 }')
+fi
 
-	# Turn on NSCA
-	run_omd $OMD_SITE config set NSCA on
-	MYPORT=5667
-	while grep -w -q $MYPORT $TMP_NSCA_PORTS ; do
-		MYPORT=$(( MYPORT + 1 ))
-	done
-	out "Setting NSCA port to $MYPORT"
+section "Configuring $CFGREPO repo."
+
+DST=$OMD_ROOT/.ssh/${CFGREPO}_git_ed25519
+if [[ -f $DST ]]; then
+	out "  SSH key for git pulls exists."
+else
+	out "  generating SSH key for git pulls"
 	pause 3
-	echo "$MYPORT" >> $TMP_NSCA_PORTS
-	run_omd $OMD_SITE config set NSCA_TCP_PORT $MYPORT 2>&1 | verbout
-
-	if type -p firewall-cmd >/dev/null 2>&1 ; then
-		out "Adding port to firewall"
-		firewall-cmd --permanent --add-port=$MYPORT/tcp | verbout
-		firewall-cmd --reload | verbout
-	fi
-
-	# Add live status
-	run_omd $OMD_SITE config set LIVESTATUS_TCP on
-	MYPORT=6557
-	while grep -w -q $MYPORT $TMP_LIVE_PORTS ; do
-		MYPORT=$(( MYPORT + 1 ))
-	done
-	out "Setting Livestatus port to $MYPORT"
-	pause 3
-	run_omd $OMD_SITE config set LIVESTATUS_TCP_PORT $MYPORT 2>&1 | verbout
-
-	if type -p firewall-cmd >/dev/null 2>&1 ; then
-		out "Adding port to firewall"
-		firewall-cmd --permanent --add-port=$MYPORT/tcp 2>&1 | verbout
-		firewall-cmd --reload 2>&1 | verbout
-	fi
-
-	# This next test may not be universal.
-	if [[ "$OS_ID_LIKE" == *debian* ]]; then
-		DST=/etc/apache2/conf-available/omd-default.site.conf
-		if [[ ! -f $DST ]]; then
-			out "Setting '$OMD_SITE' as the default site for this server."
-	pause 3
-			echo "RedirectMatch ^/$ /${OMD_SITE}/" > $DST
-			a2enmod rewrite 2>&1 | verbout
-			a2ensite omd-default.site 2>&1 | verbout
-			systemctl restart apache2 2>&1 | verbout
-		fi
-	elif [[ "$OS_ID_LIKE" == *rhel* ]]; then
-		systemctl status httpd >/dev/null 2>&1
-		# A return of 4 means it doesn't exist.  Anything less than
-		# that is either OK, it's down, or it's disabled.
-		if [[ $? -lt 4 ]]; then
-			DST=/etc/httpd/conf.d/omd-default.site.conf
-			if [[ ! -f $DST ]]; then
-				out "Setting '$OMD_SITE' as the default site for this server."
-	pause 3
-				echo "RedirectMatch ^/$ /${OMD_SITE}/" > $DEFSITECONF
-				systemctl restart httpd 2>&1 | verbout
-			fi
-		fi
-	fi
-
-	DST=$OMD_ROOT/.ssh/${CFGREPO}_git_ed25519
-	if [[ -f $DST ]]; then
-		out "SSH key for git pulls exists."
-	else
-		out "Generating SSH key for git pulls"
-		pause 3
-		# After creating the key, chown/chmod the entire directory
-		[[ -d $OMD_ROOT/.ssh ]] || mkdir $OMD_ROOT/.ssh
-		ssh-keygen -t ed25519 -N '' -f $DST 2>&1 | verbout
-		chown -R $OMD_SITE.$OMD_SITE $OMD_ROOT/.ssh
-		chmod -R go-rwx $OMD_ROOT/.ssh
-	fi
-
+	# After creating the key, chown/chmod the entire directory
+	[[ -d $OMD_ROOT/.ssh ]] || mkdir $OMD_ROOT/.ssh
+	ssh-keygen -t ed25519 -N '' -f $DST 2>&1 | verbout
+	[[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
+	chown -R $OMD_SITE.$OMD_SITE $OMD_ROOT/.ssh
+	chmod -R go-rwx $OMD_ROOT/.ssh
 	
 	echo ""
 	out "You will need to paste this as a deploy key for the"
@@ -207,37 +224,37 @@ if [[ $SITE_EXISTS -eq 0 ]]; then
 	echo ""
 	cat $DST.pub | tee -a $LOGFILE
 	echo ""
-	pause "Press ENTER after this is done to continue> "
+	pause "Press ENTER after this is done to continue"
+fi
 
-	# Create a script to do the checkout so we can run it as the
-	# omd user.
-	out "Checking out the omd-config-$OMD_SITE repo"
-	pause 3
+# Create a script to do the checkout so we can run it as the
+# omd user.
+section "Checking out the omd-config-$OMD_SITE repo"
+if [[ -d "$OMD_ROOT/local/$CFGREPO/.git" ]]; then
+	out "  $CFGREPO exists."
+else
 	cat > $TMPF1<<EOF
 #!/bin/bash
-cd ~/local
-ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+cd ~/local || exit 1
+ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null || exit 1
 export GIT_SSH_COMMAND="ssh -i $DST -o IdentitiesOnly=yes"
-git clone --no-ccheckout git@github.com:foresightautomation/omd-config-$OMD_SITE.git
-cd omd-config-$OMD_SITE
-git config core.worktree $OMD_ROOT
-git reset --hard origin/master
-git pull
+git clone --no-checkout git@github.com:foresightautomation/omd-config-$OMD_SITE.git || exit 1
+cd omd-config-$OMD_SITE || exit 1
+git config core.worktree $OMD_ROOT || exit 1
+git reset --hard origin/master || exit 1
+git pull || exit 1
 EOF
 	if [[ -n "$BRANCH" ]]; then
 		cat >> $TMPF1 <<EOF
-git checout $BRANCH
-git pull
+git checkout $BRANCH || exit 1
+git pull || exit 1
 EOF
 	fi
 	chmod 755 $TMPF1
-	su $OMD_SITE -c "/bin/bash $TMPF1"
+	su $OMD_SITE -c "/bin/bash $TMPF1" || exit 1
 	chmod 600 $TMPF1
 fi
-## END of initial site creation
 
-# Grab the OMD_ROOT
-[[ -z "$OMD_ROOT" ]] && OMD_ROOT=$(getent passwd $OMD_SITE | awk -F: '{ print $6 }')
 
 # Verify that USER5 is our nagios plugins
 section "Checking FSA resource paths"
@@ -248,7 +265,7 @@ if egrep -q '^\$USER5\$=' $DST ; then
 else
 	out "  setting \$USER5\$ to the fsa plugins path"
 	backup_file $DST
-	run_site echo "\$USER5\$=/forsight/lib64/nagios/plugins" >> $DST
+	run_site echo "\$USER5\$=/forsight/lib64/nagios/plugins" >> $DST || exit 1
 fi
 
 # Make sure our common config dir is set
@@ -256,12 +273,12 @@ section "Checking FSA config paths"
 DDIR=/foresight/etc/naemon/conf.d/common.d
 DST=$OMD_ROOT/etc/naemon/naemon.d/$CFGREPO.cfg
 if egrep -q "^cfg_dir=$DDIR" $DST 2>/dev/null ; then
-	out "  $DST set as config dir."
+	out "  $DDIR set as config dir."
 else
-	out "  adding 'cfg_dir=$DST'"
+	out "  adding 'cfg_dir=$DDIR'"
 	test -d $DDIR || mkdir -p $DDIR || exit 1
 	backup_file $DST
-	run_site echo "cfg_dir=$DST" >> $DST
+	run_site echo "cfg_dir=$DDIR" >> $DST || exit 1
 	chown $OMD_SITE.$OMD_SITE $DST
 	chmod 664 $DST
 fi
@@ -379,45 +396,55 @@ nrdp_config
 # is downloadable by the clients.  Management of those files needs to
 # be done elsewhere.  Common files can be hard linked between sites to
 # save space, and customer/site specific files can simply be there.
-function nscp_config() {
-	typeset _f1
-	NSCP_TOP=$OMD_ROOT/local/share/nscp
+NSCP_TOP=$OMD_ROOT/local/share/nscp
 
-	section "Checking NSCP ..."
-	pause 3
+section "Checking NSCP ..."
+pause 3
 
-	if [[ ! -d "$NSCP_TOP" ]]; then
-		out "  creating NSCP directory ... "
-		mkdir -p "$NSCP_TOP"
-		chown -R $OMD_SITE.$OMD_SITE "$NSCP_TOP"
-	fi
+if [[ -d "$NSCP_TOP" ]]; then
+	out "  NSCP directory exits"
+else
+	out "  creating NSCP directory ... "
+	mkdir -p "$NSCP_TOP"
+	chown -R $OMD_SITE.$OMD_SITE "$NSCP_TOP"
+fi
 
-	# Copy the Apache nscp.conf file.
-	_f1="$OMD_ROOT/etc/apache/system.d/nscp.conf"
-	if [[ -f "$_f1" ]]; then
-		out "  nscp.conf apache config already installed."
-	else
-		out "  installing nscp.conf apache config"
-		sed -e "s|\${OMD_SITE}|$OMD_SITE|g" \
-			-e "s|\${NSCP_TOP}|$NSCP_TOP|g" \
-			"$TOPDIR"/src/nscp-apache.conf  > $TMPF1
-		copy_site_file $TMPF1 "$OMD_ROOT/etc/apache/system.d/nscp.conf"
+# Copy the Apache nscp.conf file.
+DST="$OMD_ROOT/etc/apache/system.d/nscp.conf"
+if [[ -f "$DST" ]]; then
+	out "  nscp.conf apache config already installed."
+else
+	out "  installing nscp.conf apache config"
+	sed -e "s|\${OMD_SITE}|$OMD_SITE|g" \
+		-e "s|\${NSCP_TOP}|$NSCP_TOP|g" \
+		"$TOPDIR"/src/nscp-apache.conf  > $TMPF1
+	copy_site_file $TMPF1 "$OMD_ROOT/etc/apache/system.d/nscp.conf"
 	
-		out "  reloading httpd"
-		case "$OS_ID_LIKE" in
-			*rhel* ) systemctl reload httpd ;;
-			*debian* ) systemctl reload apache2 ;;
-		esac
-	fi
-}
-nscp_config
+	out "  reloading httpd"
+	case "$OS_ID_LIKE" in
+		*rhel* ) systemctl reload httpd ;;
+		*debian* ) systemctl reload apache2 ;;
+	esac
+fi
 
 section "Updating htpasswd file"
 DST=$OMD_ROOT/etc/htpasswd
-add_htpasswd_entry "$DST" "dchang" '$apr1$JmfsY5Fo$nt5mLa853LxVHmX86K7Ax.'
-add_htpasswd_entry "$DST" "erickson" '$apr1$heLauRBm$j6o9EBPDDm5bCYMOiUrrH0'
-add_htpasswd_entry "$DST" "dgood" '$apr1$h3TsjY2Z$.De2TpyAHfI0zw9O8ldGS0'
-add_htpasswd_entry "$DST" "fsareports" '$apr1$OH7Qx5bW$1/4AAcmVLgw/MDjFAShY/1'
+if ! egrep -q "^dchang:" $DST ; then
+	out "  adding dchang"
+	add_htpasswd_entry "$DST" "dchang" '$apr1$JmfsY5Fo$nt5mLa853LxVHmX86K7Ax.'
+fi
+if ! egrep -q "^erickson:" $DST ; then
+	out "  adding erickson"
+	add_htpasswd_entry "$DST" "erickson" '$apr1$heLauRBm$j6o9EBPDDm5bCYMOiUrrH0'
+fi
+if ! egrep -q "^dgood:" $DST ; then
+	out "  adding dgood"
+	add_htpasswd_entry "$DST" "dgood" '$apr1$h3TsjY2Z$.De2TpyAHfI0zw9O8ldGS0'
+fi
+if ! egrep -q "^fsareports:" $DST ; then
+	out "  adding fsareports"
+	add_htpasswd_entry "$DST" "fsareports" '$apr1$OH7Qx5bW$1/4AAcmVLgw/MDjFAShY/1'
+fi
 chown $OMD_SITE.$OMD_SITE $DST
 chmod 664 $DST
 #
@@ -425,10 +452,10 @@ chmod 664 $DST
 # Run the deploy scripts.  As we've already checked out the files, we will
 # want to do the initialize, post-deploy, and safe-deploy scripts.
 section "Running the deploy scripts as $OMD_SITE"
-out "  ${CFGRFEPO}-initialize"
+out "  ${CFGREPO}-initialize"
 DST=$OMD_ROOT/local/sbin/${CFGREPO}-initialize
 runuser -u $OMD_SITE  -- $DST
-out "  ${CFGRFEPO}-post-deploy"
+out "  ${CFGREPO}-post-deploy"
 DST=$OMD_ROOT/local/sbin/${CFGREPO}-post-deploy
 runuser -u $OMD_SITE  -- $DST
 out "  safe-deploy"
