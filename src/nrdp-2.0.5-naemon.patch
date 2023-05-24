@@ -1,0 +1,16 @@
+diff -Naur nrdp-2.0.5.orig/server/plugins/nagioscorepassivecheck/nagioscorepassivecheck.inc.php nrdp-2.0.5/server/plugins/nagioscorepassivecheck/nagioscorepassivecheck.inc.php
+--- nrdp-2.0.5.orig/server/plugins/nagioscorepassivecheck/nagioscorepassivecheck.inc.php	2021-10-14 13:52:38.000000000 -0700
++++ nrdp-2.0.5/server/plugins/nagioscorepassivecheck/nagioscorepassivecheck.inc.php	2022-04-06 11:30:54.000000000 -0700
+@@ -219,7 +219,11 @@
+     $check_result_contents .= "host_name={$hostname}\n";
+     $check_result_contents .= $service_line;
+     $check_result_contents .= "check_type=1\n";
+-    $check_result_contents .= "early_timeout=1\n";
++    // For NAEMON, we need to set early_timeout to 0, and
++    // we need the extra check_options=0 value.
++    $check_result_contents .= "early_timeout=0\n";
++    $check_result_contents .= "check_options=0\n";
++
+     $check_result_contents .= "exited_ok=1\n";
+     $check_result_contents .= "return_code={$state}\n";
+     $check_result_contents .= "output=${output}\\n\n";
