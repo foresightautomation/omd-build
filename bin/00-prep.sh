@@ -419,7 +419,7 @@ out "The log file is $LOGFILE"
 if [[ -n "$SITE_NAME" ]]; then
 	section "Running new-site script for the $SITE_NAME site."
 	pause 5
-	ARGS=(-s $SITE_NAME)
+	ARGS=(-s $SITE_NAME --verbose )
 	[[ -n "$SITE_BRANCH" ]] && ARGS+=(--branch $SITE_BRANCH)
 	$TOPDIR/bin/new-site.sh "${ARGS[@]}" || exit 1
 else

@@ -78,7 +78,7 @@ fi
 function run_omd() {
     typeset _site=$1
 	shift
-	echo omd "$@" | omd su $_site
+	echo "$@" | omd su $_site
 	return ${PIPESTATUS[1]}
 }
 # Run command as the $OMD_SITE user
@@ -112,23 +112,23 @@ CFGREPOTOP=$OMD_ROOT/local/$CFGREPO
 
 section "Checking network services"
 newtempfile TMPPORTS
-VAL=$(run_omd $OMD_SITE config show NSCA)
+VAL=$(run_omd $OMD_SITE omd config show NSCA)
 if [[ "$VAL" = "on" ]]; then
-	VAL=$(run_omd $OMD_SITE config show NSCA_TCP_PORT)
+	VAL=$(run_omd $OMD_SITE omd config show NSCA_TCP_PORT)
 	out "  NSCA is already configured and is using port $VAL"
 else
 	out "  finding NSCA ports."
 	> $TMPPORTS
 	for i in $(omd sites | awk '$NR > 1 { print $1 }') ; do
-		run_omd $i config show NSCA_TCP_PORT >> $TMPPORTS
+		run_omd $i omd config show NSCA_TCP_PORT >> $TMPPORTS
 	done
 	sort -u -o $TMPPORTS $TMPPORTS
 	MYPORT=$(( $(tail -1 $TMPPORTS) + 1 ))
 	out "  turning on NSCA"
-	run_omd $OMD_SITE config set NSCA on 2>&1 | verbout
+	run_omd $OMD_SITE omd config set NSCA on 2>&1 | verbout
 	[[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
 	out "  setting NSCA port to $MYPORT"
-	run_omd $OMD_SITE config set NSCA_TCP_PORT $MYPORT 2>&1 | verbout
+	run_omd $OMD_SITE omd config set NSCA_TCP_PORT $MYPORT 2>&1 | verbout
 	[[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
 	if type -p firewall-cmd >/dev/null 2>&1 ; then
 		out "  adding NSCA port to firewall"
@@ -139,23 +139,23 @@ else
 	fi
 fi
 
-VAL=$(run_omd $OMD_SITE config show LIVESTATUS_TCP)
+VAL=$(run_omd $OMD_SITE omd config show LIVESTATUS_TCP)
 if [[ "$VAL" = "on" ]]; then
-	VAL=$(run_omd $OMD_SITE config show LIVESTATUS_TCP_PORT)
+	VAL=$(run_omd $OMD_SITE omd config show LIVESTATUS_TCP_PORT)
 	out "  LIVESTATUS is already configured and is using port $VAL"
 else
 	out "  finding LIVESTATUS ports."
 	> $TMPPORTS
 	for i in $(omd sites | awk '$NR > 1 { print $1 }') ; do
-		run_omd $i config show LIVESTATUS_TCP_PORT >> $TMPPORTS
+		run_omd $i omd config show LIVESTATUS_TCP_PORT >> $TMPPORTS
 	done
 	sort -u -o $TMPPORTS $TMPPORTS
 	MYPORT=$(( $(tail -1 $TMPPORTS) + 1 ))
 	out "  turning on LIVESTATUS"
-	run_omd $OMD_SITE config set LIVESTATUS_TCP on 2>&1 | verbout
+	run_omd $OMD_SITE omd config set LIVESTATUS_TCP on 2>&1 | verbout
 	[[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
 	out "  setting LIVESTATUS port to $MYPORT"
-	run_omd $OMD_SITE config set LIVESTATUS_TCP_PORT $MYPORT 2>&1 | verbout
+	run_omd $OMD_SITE omd config set LIVESTATUS_TCP_PORT $MYPORT 2>&1 | verbout
 	[[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
 	if type -p firewall-cmd >/dev/null 2>&1 ; then
 		out "  adding LIVESTATUS port to firewall"
@@ -169,15 +169,15 @@ fi
 section "Checking httpd configuration."
 # This next test may not be universal.
 if [[ -d /etc/apache2/conf-available ]]; then
-	DST=/etc/apache2/conf-available/omd-default.conf
-	if [[ -f $DST ]]; then
+	if a2query -c | egrep -q "^omd-default" ; then
 		out "  omd-default already configured"
 	else
+	DST=/etc/apache2/conf-available/omd-default.conf
 		out "  setting '$OMD_SITE' as the default site for this server."
 		echo "RedirectMatch ^/$ /${OMD_SITE}/" > $DST
 		a2enmod rewrite 2>&1 | verbout
 		[[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
-		a2enconf omd-default.site 2>&1 | verbout
+		a2enconf omd-default 2>&1 | verbout
 		[[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
 		systemctl reload apache2 2>&1 | verbout
 		[[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
@@ -265,7 +265,9 @@ if egrep -q '^\$USER5\$=' $DST ; then
 else
 	out "  setting \$USER5\$ to the fsa plugins path"
 	backup_file $DST
-	run_site echo "\$USER5\$=/forsight/lib64/nagios/plugins" >> $DST || exit 1
+	echo "\$USER5\$=/forsight/lib64/nagios/plugins" >> $DST || exit 1
+	chown $OMD_SITE.$OMD_SITE $DST
+	chmod 664 $DST
 fi
 
 # Make sure our common config dir is set
@@ -278,7 +280,7 @@ else
 	out "  adding 'cfg_dir=$DDIR'"
 	test -d $DDIR || mkdir -p $DDIR || exit 1
 	backup_file $DST
-	run_site echo "cfg_dir=$DDIR" >> $DST || exit 1
+	echo "cfg_dir=$DDIR" >> $DST || exit 1
 	chown $OMD_SITE.$OMD_SITE $DST
 	chmod 664 $DST
 fi
@@ -430,19 +432,15 @@ fi
 section "Updating htpasswd file"
 DST=$OMD_ROOT/etc/htpasswd
 if ! egrep -q "^dchang:" $DST ; then
-	out "  adding dchang"
 	add_htpasswd_entry "$DST" "dchang" '$apr1$JmfsY5Fo$nt5mLa853LxVHmX86K7Ax.'
 fi
 if ! egrep -q "^erickson:" $DST ; then
-	out "  adding erickson"
 	add_htpasswd_entry "$DST" "erickson" '$apr1$heLauRBm$j6o9EBPDDm5bCYMOiUrrH0'
 fi
 if ! egrep -q "^dgood:" $DST ; then
-	out "  adding dgood"
 	add_htpasswd_entry "$DST" "dgood" '$apr1$h3TsjY2Z$.De2TpyAHfI0zw9O8ldGS0'
 fi
 if ! egrep -q "^fsareports:" $DST ; then
-	out "  adding fsareports"
 	add_htpasswd_entry "$DST" "fsareports" '$apr1$OH7Qx5bW$1/4AAcmVLgw/MDjFAShY/1'
 fi
 chown $OMD_SITE.$OMD_SITE $DST
@@ -451,16 +449,18 @@ chmod 664 $DST
 
 # Run the deploy scripts.  As we've already checked out the files, we will
 # want to do the initialize, post-deploy, and safe-deploy scripts.
+# We want to run these through 'omd su' so the entire environment gets set
+# up.
 section "Running the deploy scripts as $OMD_SITE"
 out "  ${CFGREPO}-initialize"
 DST=$OMD_ROOT/local/sbin/${CFGREPO}-initialize
-runuser -u $OMD_SITE  -- $DST
+run_omd $OMD_SITE $DST
 out "  ${CFGREPO}-post-deploy"
 DST=$OMD_ROOT/local/sbin/${CFGREPO}-post-deploy
-runuser -u $OMD_SITE  -- $DST
+run_omd $OMD_SITE $DST
 out "  safe-deploy"
 DST=$OMD_ROOT/local/$CFGREPO/${OMD_SITE}.d
-runuser -u $OMD_SITE  -- /foresight/sbin/omd-safe-deploy-ncfg.sh $DST
+run_omd $OMD_SITE /foresight/sbin/omd-safe-deploy-ncfg.sh $DST
 	
 section "Finished."
 echo "Logged to $LOGFILE"
